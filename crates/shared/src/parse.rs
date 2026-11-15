@@ -140,3 +140,32 @@ pub fn safe_atoi(s: &[u8]) -> Result<i32, i32> {
     }
     Ok(l as i32)
 }
+
+/// `parse_mode()`: octal, at most 07777.
+pub fn parse_mode(s: &[u8]) -> Result<u32, i32> {
+    let m = safe_atou_full(s, 8 | SAFE_ATO_REFUSE_PLUS_MINUS)?;
+    if m > 0o7777 {
+        return Err(-libc::ERANGE);
+    }
+    Ok(m)
+}
+
+/// `parse_devnum()`: "MAJOR:MINOR".
+pub fn parse_devnum(s: &[u8]) -> Result<u64, i32> {
+    let n = s.iter().take_while(|b| b.is_ascii_digit()).count();
+    if n == 0 || n > 20 || s.get(n) != Some(&b':') {
+        return Err(-libc::EINVAL);
+    }
+    let x = safe_atou(&s[..n])?;
+    let y = safe_atou(&s[n + 1..])?;
+    if x > (1 << 12) - 1 || y > (1 << 20) - 1 {
+        return Err(-libc::ERANGE);
+    }
+    Ok(libc::makedev(x, y))
+}
+
+/// `split_pair(s, sep)`.
+pub fn split_pair<'a>(s: &'a [u8], sep: &[u8]) -> Result<(&'a [u8], &'a [u8]), i32> {
+    let i = s.windows(sep.len()).position(|w| w == sep).ok_or(-libc::EINVAL)?;
+    Ok((&s[..i], &s[i + sep.len()..]))
+}

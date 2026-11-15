@@ -512,15 +512,19 @@ pub fn conf_files_list_strv_full(
     Ok(out)
 }
 
-/// `conf_file_read(root=NULL, config_dirs, fn, parse_line, userdata, ignore_enoent, invalid_config)`.
+/// `conf_file_read(root, config_dirs, fn, parse_line, userdata, ignore_enoent, invalid_config)`.
 ///
-/// `parse_line(fname, line_no, line)` returns C's int.  Returns 0 if the
-/// file was skipped, 1 or the first parse error otherwise.
+/// `parse_line(fname, line_no, line, &invalid_line)` returns C's int.
+/// Returns 0 if the file was skipped, 1 or the first parse error otherwise.
+/// A failed line that set `invalid_line` sets `invalid_config` instead of
+/// becoming the result.
 pub fn conf_file_read(
+    root: Option<&[u8]>,
     config_dirs: &[Vec<u8>],
     path: &[u8],
-    parse_line: &mut dyn FnMut(&[u8], u32, &[u8]) -> i32,
+    parse_line: &mut dyn FnMut(&[u8], u32, &[u8], &mut bool) -> i32,
     ignore_enoent: bool,
+    mut invalid_config: Option<&mut bool>,
 ) -> i32 {
     let ellipsis = glyph(Glyph::Ellipsis);
     let opened: Result<(CReader, Vec<u8>), (i32, Vec<u8>)> = if path == b"-" {
@@ -539,7 +543,7 @@ pub fn conf_file_read(
             Err(e) => Err((e, abs)),
         }
     } else {
-        match search_and_fopen(path, "re", config_dirs) {
+        match search_and_fopen(path, "re", root, config_dirs) {
             Ok((f, p)) => {
                 log_debug!("Reading config file \"", p, "\"", ellipsis);
                 Ok((f, p))
@@ -569,11 +573,89 @@ pub fn conf_file_read(
         if line.is_empty() || line[0] == b'#' {
             continue;
         }
-        let k = parse_line(&fname, v, &line);
-        ret_gather(&mut r, k);
+        let mut invalid_line = false;
+        let k = parse_line(&fname, v, &line, &mut invalid_line);
+        match invalid_config.as_deref_mut() {
+            Some(ic) if k < 0 && invalid_line => *ic = true,
+            _ => ret_gather(&mut r, k),
+        }
     }
     if f.has_error() {
         ret_gather(&mut r, log_error_errno!(synthetic(libc::EIO), "Failed to read from file ", fname, "."));
     }
     r
+}
+
+/// `conf_files_list_with_replacement(root, config_dirs, replacement, &files, &inserted)`.
+pub fn conf_files_list_with_replacement(
+    root: Option<&[u8]>,
+    config_dirs: &[Vec<u8>],
+    replacement: Option<&[u8]>,
+) -> Result<(Vec<Vec<u8>>, Option<Vec<u8>>), i32> {
+    let flags = CONF_FILES_REGULAR | CONF_FILES_FILTER_MASKED_BY_SYMLINK | CONF_FILES_WARN;
+    let (root_abs, rfd, dirs_abs) = prepare_dirs(root, flags, Some(config_dirs))?;
+    let root_l = root_abs.as_deref();
+    let rs = root_str(root_l).to_vec();
+    let mut c = match replacement {
+        Some(rep) => Some(conf_file_new_at(rep, Some(&rs), rfd.raw(), flags & CONF_FILES_WARN)?),
+        None => None,
+    };
+    let mut fh = BTreeMap::new();
+    let mut masked = BTreeSet::new();
+    let mut inserted: Option<Vec<u8>> = None;
+    let insert = |fh: &mut BTreeMap<Vec<u8>, ConfFile>, c: ConfFile, inserted: &mut Option<Vec<u8>>| {
+        if let Some(existing) = fh.get(&c.filename) {
+            log_debug!(
+                "An entry with higher priority '",
+                existing.filename,
+                "' -> '",
+                existing.result,
+                "' already exists, ignoring the replacement: ",
+                c.original_path
+            );
+            *inserted = None;
+            return;
+        }
+        log_debug!("Inserted replacement: '", c.filename, "' -> '", c.result, "'");
+        *inserted = Some(c.result.clone());
+        fh.insert(c.filename.clone(), c);
+    };
+    for p in &dirs_abs {
+        let (path, mut dir) = match chase_and_opendirat(rfd.raw(), rfd.raw(), p, 0, true) {
+            Ok(x) => x,
+            Err(r) => {
+                if r != -libc::ENOENT {
+                    log_full_errno!(
+                        log_level(flags),
+                        r,
+                        "Failed to chase and open directory '",
+                        rs,
+                        skip_leading_slash(p),
+                        "', ignoring: ",
+                        strerror(r)
+                    );
+                }
+                continue;
+            }
+        };
+        let path = path.expect("requested");
+        if let Some(cf) = &c
+            && crate::path::path_startswith(&cf.result, &path) == Some(&cf.filename[..])
+        {
+            let cf = c.take().expect("checked");
+            insert(&mut fh, cf, &mut inserted);
+        }
+        files_add(&mut dir, p, &path, Some(&rs), rfd.raw(), &mut fh, &mut masked, Some(b".conf"), flags)?;
+    }
+    if let Some(cf) = c.take() {
+        insert(&mut fh, cf, &mut inserted);
+    }
+    let ins = match inserted {
+        Some(r) => Some(chaseat_prefix_root(&r, root_l).map_err(|e| {
+            log_full_errno!(log_level(flags), e, "Failed to prefix '", r, "' with root '", rs, "': ", strerror(e))
+        })?),
+        None => None,
+    };
+    let files = copy_and_sort(fh, Some(b".conf"), Some(&rs), flags)?;
+    Ok((files, ins))
 }

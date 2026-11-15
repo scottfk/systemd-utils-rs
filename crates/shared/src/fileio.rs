@@ -437,16 +437,38 @@ fn mode_to_flags(mode: &str) -> i32 {
     flags
 }
 
-/// `path_strv_resolve_uniq(search, root)` for root == NULL: resolve each
-/// search directory's symlinks (`chase()`), dropping ones that fail
-/// otherwise than with ENOENT, then drop duplicates.
-pub fn path_strv_resolve_uniq(search: &[Vec<u8>]) -> Vec<Vec<u8>> {
+/// `path_strv_resolve_uniq(search, root)`: resolve each search directory's
+/// symlinks (`chase()`) within root, dropping ones that fail otherwise than
+/// with ENOENT, then drop duplicates.
+pub fn path_strv_resolve_uniq(search: &[Vec<u8>], root: Option<&[u8]>) -> Vec<Vec<u8>> {
     let mut out: Vec<Vec<u8>> = Vec::new();
     for s in search {
-        let u = match crate::chase::chase(s, None, 0, true, false) {
-            Ok(c) => c.path.expect("requested"),
+        let t = match root {
+            Some(r) => {
+                if !path_is_absolute(s) {
+                    crate::log_debug!("Ignoring non-absolute search path '", s, "'.");
+                    continue;
+                }
+                path_join(&[r, s])
+            }
+            None => s.clone(),
+        };
+        let u = match crate::chase::chase(&t, root, 0, true, false) {
             Err(e) if e == -libc::ENOENT => s.clone(),
             Err(_) => continue,
+            Ok(c) => {
+                let u = c.path.expect("requested");
+                match root {
+                    Some(r) => match crate::path::path_startswith(&u, r) {
+                        Some(x) if x.first() == Some(&b'/') => x.to_vec(),
+                        Some(x) => crate::bcat!("/", x),
+                        // The canonicalized path goes outside of the prefix:
+                        // keep the original path instead.
+                        None => s.clone(),
+                    },
+                    None => u,
+                }
+            }
         };
         out.push(u);
     }
@@ -459,16 +481,21 @@ pub fn path_strv_resolve_uniq(search: &[Vec<u8>]) -> Vec<Vec<u8>> {
     uniq
 }
 
-/// `search_and_fopen(path, mode, root=NULL, search, &f, &found)`.
-pub fn search_and_fopen(path: &[u8], mode: &str, search: &[Vec<u8>]) -> Result<(CReader, Vec<u8>), i32> {
+/// `search_and_fopen(path, mode, root, search, &f, &found)`.
+pub fn search_and_fopen(
+    path: &[u8],
+    mode: &str,
+    root: Option<&[u8]>,
+    search: &[Vec<u8>],
+) -> Result<(CReader, Vec<u8>), i32> {
     let flags = mode_to_flags(mode);
     if path_is_absolute(path) {
         let fd = sys::open(path, flags, 0o777)?;
         return Ok((CReader::from_fd(fd), path_simplify(path)));
     }
-    let search = path_strv_resolve_uniq(search);
+    let search = path_strv_resolve_uniq(search, root);
     for i in &search {
-        let p = path_join(&[i, path]);
+        let p = path_join(&[root.unwrap_or_default(), i, path]);
         match sys::open(&p, flags, 0o777) {
             Ok(fd) => return Ok((CReader::from_fd(fd), path_simplify(&p))),
             Err(e) if e != -libc::ENOENT => return Err(e),
@@ -491,5 +518,5 @@ pub fn open_config(path: &[u8], search: &[Vec<u8>]) -> Result<(CReader, Vec<u8>)
             Err(e) => Err((e, abs)),
         };
     }
-    search_and_fopen(path, "re", search).map_err(|e| (e, path.to_vec()))
+    search_and_fopen(path, "re", None, search).map_err(|e| (e, path.to_vec()))
 }

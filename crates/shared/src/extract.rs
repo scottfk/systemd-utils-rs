@@ -330,3 +330,47 @@ pub fn strv_split_full(s: &[u8], separators: Option<&[u8]>, flags: u32) -> Resul
     }
     Ok(l)
 }
+
+/// `cunescape(s, 0, &ret)`: undo C escapes; invalid ones are errors.
+pub fn cunescape(s: &[u8]) -> Result<Vec<u8>, i32> {
+    let s = crate::bytes::c_str_prefix(s);
+    let mut out = Vec::with_capacity(s.len());
+    let mut f = 0;
+    while f < s.len() {
+        if s[f] != b'\\' {
+            out.push(s[f]);
+            f += 1;
+            continue;
+        }
+        let remaining = s.len() - f;
+        if remaining == 1 {
+            return Err(-libc::EINVAL);
+        }
+        let (u, eight_bit, r) = cunescape_one(&s[f + 1..], remaining - 1, false)?;
+        f += r + 1;
+        if eight_bit {
+            out.push(u as u8);
+        } else {
+            utf8_encode_unichar(&mut out, u);
+        }
+    }
+    Ok(out)
+}
+
+/// `extract_many_words(&p, NULL, flags, &w1, ..., &wn)`: the words found
+/// (fewer than n if the line ran out) and what's left of p.
+pub fn extract_many_words(
+    p: &mut Option<&[u8]>,
+    separators: Option<&[u8]>,
+    flags: u32,
+    n: usize,
+) -> Result<Vec<Vec<u8>>, i32> {
+    let mut out = Vec::new();
+    for _ in 0..n {
+        match extract_first_word(p, separators, flags)? {
+            Some(w) => out.push(w),
+            None => break,
+        }
+    }
+    Ok(out)
+}

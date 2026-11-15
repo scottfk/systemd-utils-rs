@@ -48,7 +48,7 @@ fn mkdirat_safe_ignore_existing(dir_fd: i32, path: &[u8], mode: u32) -> Result<(
 }
 
 /// `mkdirat_parents_internal(dir_fd, path, mode, ...)`.
-fn mkdirat_parents(dir_fd: i32, path: &[u8], mode: u32) -> Result<(), i32> {
+pub fn mkdirat_parents(dir_fd: i32, path: &[u8], mode: u32) -> Result<(), i32> {
     if path.is_empty() {
         return Ok(());
     }
@@ -174,4 +174,48 @@ pub fn conservative_rename(old: &[u8], new: &[u8]) -> Result<bool, i32> {
     }
     sys::renameat(AT_FDCWD, old, AT_FDCWD, new)?;
     Ok(true)
+}
+
+/// `proc_mounted()`: is procfs mounted at /proc?  (Errno preserved.)
+pub fn proc_mounted_full() -> Result<bool, i32> {
+    let saved = sys::errno();
+    let r = match sys::statfs_type(b"/proc/") {
+        Ok(t) => Ok(t == libc::PROC_SUPER_MAGIC),
+        Err(e) if e == -libc::ENOENT => Ok(false),
+        Err(e) => Err(e),
+    };
+    sys::set_errno(saved);
+    r
+}
+
+/// `proc_mounted() > 0`, treating errors as "don't know: no".
+pub fn proc_mounted() -> bool {
+    matches!(proc_mounted_full(), Ok(true))
+}
+
+/// Create something under a random temporary name next to `path`, then
+/// rename it into place (`mknodat_atomic()` and friends).
+fn create_atomic(atfd: i32, path: &[u8], create: impl FnOnce(&[u8]) -> Result<(), i32>) -> Result<(), i32> {
+    let t = tempfn_random(path, None)?;
+    create(&t)?;
+    if let Err(e) = sys::renameat(atfd, &t, atfd, path) {
+        let _ = sys::unlinkat(atfd, &t, 0);
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// `mknodat_atomic(atfd, path, mode, dev)`.
+pub fn mknodat_atomic(atfd: i32, path: &[u8], mode: u32, dev: u64) -> Result<(), i32> {
+    create_atomic(atfd, path, |t| sys::mknodat(atfd, t, mode, dev))
+}
+
+/// `mkfifoat_atomic(dir_fd, path, mode)`.
+pub fn mkfifoat_atomic(dir_fd: i32, path: &[u8], mode: u32) -> Result<(), i32> {
+    create_atomic(dir_fd, path, |t| sys::mkfifoat(dir_fd, t, mode))
+}
+
+/// `symlinkat_atomic_full(target, atfd, linkpath, 0)`.
+pub fn symlinkat_atomic(target: &[u8], atfd: i32, linkpath: &[u8]) -> Result<(), i32> {
+    create_atomic(atfd, linkpath, |t| sys::symlinkat(target, atfd, t))
 }
