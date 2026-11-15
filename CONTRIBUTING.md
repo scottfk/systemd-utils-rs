@@ -59,9 +59,15 @@ and `/etc/subgid` (with `newuidmap`/`newgidmap` from shadow).
 tools/build-reference.sh   # build the C reference at the pinned tag into ../systemd
 ```
 
-The `make` targets (`make`, `make check`, `make clippy`, `make fmt`) arrive with the
-first code. **Before sending a PR, please make sure `make check`, `make clippy` and
-`make fmt` are clean.**
+```sh
+make            # release build in target/release/
+make check      # build the reference if needed, then run every test
+make clippy     # cargo clippy --all-targets -D warnings
+make fmt        # cargo fmt
+```
+
+**Before sending a PR, please make sure `make check`, `make clippy` and `make fmt` are
+clean.**
 
 ### Differential tests
 

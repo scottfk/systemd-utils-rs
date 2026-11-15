@@ -1,0 +1,34 @@
+[workspace]
+resolver = "3"
+members = ["crates/shared", "crates/sysctl"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+repository = "https://github.com/scottfk/systemd-utils-rs"
+
+[workspace.dependencies]
+libc = "0.2"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "warn"
+# The port keeps C's control flow and signatures, so it can be read side by
+# side with upstream; these lints would have it restructured.
+too_many_arguments = "allow"
+type_complexity = "allow"
+needless_range_loop = "allow"
+while_let_loop = "allow"
+if_same_then_else = "allow"
+should_implement_trait = "allow"
+manual_checked_ops = "allow"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
