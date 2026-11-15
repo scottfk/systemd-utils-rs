@@ -14,3 +14,10 @@ it's surprising and user-visible; **low** means it's cosmetic or hard to hit.
 | Severity | Quirk |
 |---|---|
 | medium | With `--save=`, the result of saving replaces the result of parsing the files given, so a file that couldn't be read (or another parse error) no longer makes the run fail if saving works. Without `--save=` the same error gives exit status 1. |
+
+## systemd-tmpfiles
+
+| Severity | Quirk |
+|---|---|
+| low | While cleaning a directory (`dir_cleanup()`), the result is overwritten by every entry's `statx()`, so a failure to remove an earlier entry (logged as a warning) only makes the run fail if it happens on the last entry looked at. |
+| low | `btrfs_subvol_get_parent()` (used by `q` and `Q` lines when quotas are on) doesn't advance its search between rounds, so a tree search that returns items but no match would repeat forever. The kernel always returns the backref it looks for, so it doesn't happen in practice. |

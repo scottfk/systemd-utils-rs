@@ -22,3 +22,11 @@ dependencies = [
  "libc",
  "shared",
 ]
+
+[[package]]
+name = "systemd-tmpfiles"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "shared",
+]

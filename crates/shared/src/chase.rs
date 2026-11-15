@@ -2,7 +2,7 @@
 //! `chase.c`: resolve a path one component at a time, pinning each step
 //! with an O_PATH fd, optionally inside a root directory.
 //!
-//! Not ported: CHASE_STEP, CHASE_NO_AUTOFS and CHASE_TRIGGER_AUTOFS
+//! Not ported: CHASE_STEP and CHASE_TRIGGER_AUTOFS
 //! (nothing in systemd-utils uses them).
 
 use crate::fd::{AT_FDCWD, XAT_FDROOT, dir_fd_is_root, fd_reopen, wildcard_fd_is_valid};
@@ -265,6 +265,24 @@ pub struct Chased {
     pub fd: Option<OwnedFd>,
 }
 
+const AUTOFS_SUPER_MAGIC: i64 = 0x0187;
+
+/// `log_autofs_mount_point()`.
+fn log_autofs_mount_point(fd: i32, path: &[u8], flags: u32) -> i32 {
+    if flags & CHASE_WARN == 0 {
+        return -libc::EREMOTE;
+    }
+    let n1 = crate::fd::fd_get_path(fd).ok();
+    crate::log_warning_errno!(
+        crate::errno::synthetic(libc::EREMOTE),
+        "Detected autofs mount point '",
+        crate::string::strna(n1.as_deref()),
+        "' during canonicalization of '",
+        path,
+        "'."
+    )
+}
+
 /// `chaseat(root_fd, dir_fd, path, flags, ret_path, ret_fd)`.
 pub fn chaseat(
     root_fd: i32,
@@ -274,7 +292,7 @@ pub fn chaseat(
     want_path: bool,
     want_fd: bool,
 ) -> Result<Chased, i32> {
-    assert!(flags & (CHASE_PREFIX_ROOT | CHASE_STEP | CHASE_NO_AUTOFS | CHASE_TRIGGER_AUTOFS) == 0);
+    assert!(flags & (CHASE_PREFIX_ROOT | CHASE_STEP | CHASE_TRIGGER_AUTOFS) == 0);
     assert!(wildcard_fd_is_valid(dir_fd) && wildcard_fd_is_valid(root_fd));
 
     let mut root_fd = root_fd;
@@ -462,6 +480,12 @@ pub fn chaseat(
         let stx_child = sys::statx_fd(child.raw())?;
         if flags & CHASE_SAFE != 0 && statx_unsafe_transition(&stx, &stx_child) {
             return Err(log_unsafe_transition(fd.raw(), child.raw(), path, flags));
+        }
+
+        if flags & CHASE_NO_AUTOFS != 0
+            && crate::stat_util::is_fs_type_at(child.raw(), None, AUTOFS_SUPER_MAGIC).unwrap_or(false)
+        {
+            return Err(log_autofs_mount_point(child.raw(), path, flags));
         }
 
         if s_islnk(stx_child.mode) && !(flags & CHASE_NOFOLLOW != 0 && todo_rest.is_empty()) {

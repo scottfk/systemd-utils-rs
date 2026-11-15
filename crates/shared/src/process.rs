@@ -61,6 +61,7 @@ pub fn safe_fork(name: &str, flags: u32) -> Result<i32, i32> {
             strerror(r)
         );
     }
+    crate::sys_acl::block_dlopen();
     if let Some(sig) = deathsig(flags)
         && let Err(r) = sys::set_pdeathsig(sig)
     {

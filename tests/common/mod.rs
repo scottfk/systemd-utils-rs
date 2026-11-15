@@ -82,6 +82,10 @@ pub enum Node {
     Symlink(String),
     /// A FIFO, mode.
     Fifo(u32),
+    /// A hard link to an earlier node (path under T).
+    Hardlink(String),
+    /// A unix socket nobody listens on any more.
+    Socket,
 }
 
 #[derive(Debug, Clone)]
@@ -109,6 +113,19 @@ pub struct Case {
     /// Compare output lines sorted: for output that two processes write
     /// concurrently (e.g. the parent's and the pager's debug logs).
     pub sorted: bool,
+    /// Also snapshot extended attributes (ACLs and capabilities included),
+    /// file attributes (lsattr), and access and modification times (those
+    /// within an hour of the real time are "recent").
+    pub meta: bool,
+    /// (path under T, seconds): set its access and modification times,
+    /// after every node is made.
+    pub touch: Vec<(String, i64)>,
+    /// Run with a root of the sandbox's own: a tmpfs owned by the
+    /// sandbox's root, holding binds of the system directories, the repo
+    /// and the reference build.  Otherwise "/" belongs to the real root,
+    /// which the sandbox sees as nobody, and every path from "/" down to
+    /// `T` has an unsafe nobody → root transition (CHASE_SAFE refuses it).
+    pub own_root: bool,
 }
 
 impl Case {
@@ -127,6 +144,9 @@ impl Case {
             journal: false,
             read_only: Vec::new(),
             sorted: false,
+            meta: false,
+            touch: Vec::new(),
+            own_root: false,
         }
     }
 
@@ -177,6 +197,14 @@ impl Case {
         self
     }
 
+    pub fn hardlink(mut self, path: &str, existing: &str) -> Case {
+        self.nodes.push((path.to_string(), Node::Hardlink(existing.to_string())));
+        self
+    }
+    pub fn socket(mut self, path: &str) -> Case {
+        self.nodes.push((path.to_string(), Node::Socket));
+        self
+    }
     pub fn no_node(mut self, path: &str) -> Case {
         self.nodes.retain(|(p, _)| p != path);
         self
@@ -226,6 +254,18 @@ impl Case {
 
     /// Make `path` read-only in the sandbox: a path the program sees, e.g.
     /// `/proc/sys/kernel` (`@T@` works too).
+    pub fn meta(mut self) -> Case {
+        self.meta = true;
+        self
+    }
+    pub fn own_root(mut self) -> Case {
+        self.own_root = true;
+        self
+    }
+    pub fn touch(mut self, path: &str, sec: i64) -> Case {
+        self.touch.push((path.to_string(), sec));
+        self
+    }
     pub fn read_only(mut self, path: &str) -> Case {
         self.read_only.push(path.into());
         self
@@ -348,9 +388,74 @@ struct Spawn {
     stdio: [c_int; 3],
     /// Make the pty (stdio[0]) the controlling terminal.
     ctty: bool,
+    /// Chroot into a root of our own before exec.
+    newroot: Option<NewRoot>,
     exe: CString,
     argv: Vec<CString>,
     envp: Vec<CString>,
+}
+
+/// What makes up `Case::own_root`, prepared before fork.
+struct NewRoot {
+    /// Where the tmpfs goes (an empty directory in T, outside the snapshot).
+    dir: CString,
+    /// Directories to make in it, parents first.
+    mkdirs: Vec<CString>,
+    /// (target, link) symlinks to make in it.
+    symlinks: Vec<(CString, CString)>,
+    /// (source, target in it) recursive binds.
+    binds: Vec<(CString, CString)>,
+}
+
+impl NewRoot {
+    fn new(t: &Path, bin: &Path) -> NewRoot {
+        let dir = t.join(".newroot");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut mkdirs: Vec<PathBuf> = Vec::new();
+        let mut symlinks = Vec::new();
+        let mut binds = Vec::new();
+        let add_dirs = |p: &Path, mkdirs: &mut Vec<PathBuf>| {
+            for a in p.ancestors().collect::<Vec<_>>().into_iter().rev().skip(1) {
+                if !mkdirs.iter().any(|m| m == a) {
+                    mkdirs.push(a.to_path_buf());
+                }
+            }
+        };
+        for sys in ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/dev", "/proc", "/sys", "/run", "/var", "/tmp"]
+        {
+            let p = Path::new(sys);
+            match p.symlink_metadata() {
+                Ok(m) if m.file_type().is_symlink() => {
+                    symlinks.push((std::fs::read_link(p).unwrap(), p.to_path_buf()));
+                }
+                Ok(_) => {
+                    add_dirs(p, &mut mkdirs);
+                    binds.push((p.to_path_buf(), p.to_path_buf()));
+                }
+                Err(_) => {}
+            }
+        }
+        // The repo (target/, the shim, and T at fixed_root()), the
+        // reference build, and the binary's directory.
+        let mut extra = vec![repo_dir(), reference_build()];
+        if let Some(d) = bin.parent() {
+            extra.push(d.canonicalize().unwrap());
+        }
+        for p in extra {
+            if binds.iter().any(|(s, _): &(PathBuf, PathBuf)| p.starts_with(s)) {
+                continue;
+            }
+            add_dirs(&p, &mut mkdirs);
+            binds.push((p.clone(), p));
+        }
+        let under = |p: &Path| path_c(&dir.join(p.strip_prefix("/").unwrap()));
+        NewRoot {
+            dir: path_c(&dir),
+            mkdirs: mkdirs.iter().map(|m| under(m)).collect(),
+            symlinks: symlinks.iter().map(|(t, l)| (path_c(t), under(l))).collect(),
+            binds: binds.iter().map(|(s, d)| (path_c(s), under(d))).collect(),
+        }
+    }
 }
 
 fn pipe() -> (c_int, c_int) {
@@ -420,6 +525,30 @@ fn spawn_in_sandbox(s: Spawn) -> u32 {
                     || libc::mount(none, p.as_ptr(), none, fl, std::ptr::null()) != 0
                 {
                     libc::_exit(119);
+                }
+            }
+            if let Some(nr) = &s.newroot {
+                let tmpfs = cstr("tmpfs");
+                let opts = cstr("mode=0755");
+                if libc::mount(tmpfs.as_ptr(), nr.dir.as_ptr(), tmpfs.as_ptr(), 0, opts.as_ptr().cast()) != 0 {
+                    libc::_exit(118);
+                }
+                for d in &nr.mkdirs {
+                    libc::mkdir(d.as_ptr(), 0o755);
+                }
+                for (target, link) in &nr.symlinks {
+                    libc::symlink(target.as_ptr(), link.as_ptr());
+                }
+                for (src, dst) in &nr.binds {
+                    if libc::mount(src.as_ptr(), dst.as_ptr(), none, libc::MS_BIND | libc::MS_REC, std::ptr::null())
+                        != 0
+                    {
+                        libc::_exit(118);
+                    }
+                }
+                let dot = cstr(".");
+                if libc::chdir(nr.dir.as_ptr()) != 0 || libc::chroot(dot.as_ptr()) != 0 {
+                    libc::_exit(118);
                 }
             }
             if let As::User(u, g, _) = s.user
@@ -517,6 +646,7 @@ fn root_shell(t: &Path, script: &str) -> Vec<u8> {
         dir: cstr("/"),
         stdio: [null.as_raw_fd(), outf.as_raw_fd(), outf.as_raw_fd()],
         ctty: false,
+        newroot: None,
         exe: cstr("/bin/sh"),
         argv: vec![cstr("sh"), cstr("-c"), cstr(script)],
         envp: vec![cstr("PATH=/usr/bin:/bin"), cstr("LC_ALL=C")],
@@ -578,14 +708,31 @@ pub fn normalize(s: &str, t: &Path, pid: u32) -> String {
 
 /// The tree under `t`, as root in the sandbox: type, mode, owner, contents
 /// (and "now" for regular files modified during the run).
-fn snapshot(t: &Path, pid: u32) -> BTreeMap<String, String> {
+fn snapshot(t: &Path, pid: u32, meta: bool) -> BTreeMap<String, String> {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    let meta_sh = if meta {
+        format!(
+            "x=$(stat -c %X \"$f\"); y=$(stat -c %Y \"$f\")
+             [ \"$x\" -gt {recent} ] && [ \"$x\" -lt {soon} ] && x=recent
+             [ \"$y\" -gt {recent} ] && [ \"$y\" -lt {soon} ] && y=recent
+             printf ' times=%s,%s links=%s' \"$x\" \"$y\" \"$(stat -c %h \"$f\")\"
+             if [ ! -L \"$f\" ] && {{ [ -f \"$f\" ] || [ -d \"$f\" ]; }}; then
+               printf ' attr=%s' \"$(lsattr -d \"$f\" 2>/dev/null | cut -d' ' -f1)\"
+             fi
+             printf '%s' \"$(getfattr -h -d -e hex -m - \"$f\" 2>/dev/null | grep -v '^#' | grep . | tr '\\n' ' ')\"",
+            recent = now - 3600,
+            soon = now + 3600
+        )
+    } else {
+        String::new()
+    };
     let script = format!(
         "cd '{}' || exit 1
-         find . -mindepth 1 \\( -path ./.realetc -o -path ./devlog -o -path ./.faketime -o -path ./.stdin \
+         find . -mindepth 1 \\( -path ./.realetc -o -path ./.newroot -o -path ./devlog -o -path ./.faketime -o -path ./.stdin \
             -o -path ./.stdout -o -path ./.stderr -o -path ./run/systemd/journal/socket \
             -o \\( -type l -path './etc/*' \\) \\) -prune -o -print | LC_ALL=C sort | while read -r f; do
            printf '\\001%s\\002%s' \"$f\" \"$(stat -c '%F %a %u:%g' \"$f\")\"
+           {meta_sh}
            if [ -f \"$f\" ] && [ ! -L \"$f\" ]; then
              m=$(stat -c %Y \"$f\"); [ \"$m\" -gt {recent} ] && printf ' modified'
            fi
@@ -670,6 +817,12 @@ pub fn run(case: &Case, prog: &Program, label: &str, bin: &Path) -> Outcome {
             Node::Symlink(target) => {
                 std::os::unix::fs::symlink(subst(target), &p).unwrap();
             }
+            Node::Hardlink(existing) => {
+                std::fs::hard_link(t.join(existing), &p).unwrap();
+            }
+            Node::Socket => {
+                drop(std::os::unix::net::UnixListener::bind(&p).unwrap());
+            }
             Node::Fifo(mode) => {
                 let c = path_c(&p);
                 // SAFETY: c is NUL-terminated.
@@ -689,8 +842,14 @@ pub fn run(case: &Case, prog: &Program, label: &str, bin: &Path) -> Outcome {
             unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), ts.as_ptr(), libc::AT_SYMLINK_NOFOLLOW) };
         }
     }
+    for (path, sec) in &case.touch {
+        let c = path_c(&t.join(path));
+        let ts = [libc::timespec { tv_sec: *sec, tv_nsec: 0 }, libc::timespec { tv_sec: *sec, tv_nsec: 0 }];
+        // SAFETY: c is NUL-terminated and ts holds two timespecs.
+        assert_eq!(unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), ts.as_ptr(), libc::AT_SYMLINK_NOFOLLOW) }, 0);
+    }
     // Directories' modes last, innermost first, so the files inside them
-    // could be made.
+    // could be made.  (chown and chmod leave the times alone.)
     let (mut dirs, mut chowns): (Vec<_>, Vec<_>) =
         chowns.into_iter().partition(|(p, ..)| Path::new(std::str::from_utf8(p.as_bytes()).unwrap()).is_dir());
     dirs.sort_by_key(|(p, ..)| std::cmp::Reverse(p.as_bytes().len()));
@@ -772,6 +931,7 @@ pub fn run(case: &Case, prog: &Program, label: &str, bin: &Path) -> Outcome {
         dir: path_c(&fixed_root()),
         stdio,
         ctty: pty.is_some(),
+        newroot: if case.own_root { Some(NewRoot::new(&t, bin)) } else { None },
         exe: path_c(bin),
         argv,
         envp,
@@ -804,7 +964,7 @@ pub fn run(case: &Case, prog: &Program, label: &str, bin: &Path) -> Outcome {
     };
     assert_ne!(status, "timeout", "{}: {label}: did not exit", case.name);
     if let Some(code) = status.strip_prefix("exit ").and_then(|c| c.parse::<i32>().ok()) {
-        assert!(!(119..=127).contains(&code), "{}: {label}: sandbox setup failed ({status})", case.name);
+        assert!(!(118..=127).contains(&code), "{}: {label}: sandbox setup failed ({status})", case.name);
     }
 
     stop.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -845,7 +1005,7 @@ pub fn run(case: &Case, prog: &Program, label: &str, bin: &Path) -> Outcome {
         (rd(".stdout"), rd(".stderr"))
     };
     let (out, err) = if case.sorted { (sort_lines(&out), sort_lines(&err)) } else { (out, err) };
-    let files = snapshot(&t, pid);
+    let files = snapshot(&t, pid, case.meta);
     Outcome { status, stdout: out, stderr: err, syslog, journal, files }
 }
 

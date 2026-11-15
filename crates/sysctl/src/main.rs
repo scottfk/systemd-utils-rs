@@ -262,7 +262,14 @@ fn parse_line(a: &Args, opts: &mut Options, fname: &[u8], line: u32, buffer: &[u
 
 /// `parse_file()`.
 fn parse_file(a: &Args, opts: &mut Options, path: &[u8], ignore_enoent: bool) -> i32 {
-    conf_file_read(&conf_paths("sysctl.d"), path, &mut |f, l, b| parse_line(a, opts, f, l, b), ignore_enoent)
+    conf_file_read(
+        None,
+        &conf_paths("sysctl.d"),
+        path,
+        &mut |f, l, b, _| parse_line(a, opts, f, l, b),
+        ignore_enoent,
+        None,
+    )
 }
 
 /// `read_credential_lines()`.

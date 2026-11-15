@@ -15,6 +15,8 @@ pub type Fd = c_int;
 unsafe extern "C" {
     #[link_name = "secure_getenv"]
     fn secure_getenv_c(name: *const c_char) -> *mut c_char;
+    fn fgetpwent(stream: *mut libc::FILE) -> *mut libc::passwd;
+    fn fgetgrent(stream: *mut libc::FILE) -> *mut libc::group;
 }
 pub type Stat = libc::stat;
 
@@ -465,6 +467,13 @@ impl Dir {
     pub fn fd(&self) -> Fd {
         // SAFETY: self.0 is a live DIR*.
         unsafe { libc::dirfd(self.0) }
+    }
+
+    /// Give up ownership of the `DIR*`.
+    fn into_raw(self) -> *mut libc::DIR {
+        let d = self.0;
+        std::mem::forget(self);
+        d
     }
 }
 
@@ -965,7 +974,25 @@ unsafe extern "C" fn readdir_no_dot(d: *mut c_void) -> *mut libc::dirent {
     }
 }
 
+/// The `opendir_func` of `safe_glob_full()`, if not plain opendir().
+pub type OpendirFn = fn(&[u8]) -> Result<Dir, i32>;
+
+thread_local! {
+    static GLOB_OPENDIR: std::cell::Cell<Option<OpendirFn>> = const { std::cell::Cell::new(None) };
+}
+
 unsafe extern "C" fn opendir_hook(p: *const c_char) -> *mut c_void {
+    if let Some(f) = GLOB_OPENDIR.with(|g| g.get()) {
+        // SAFETY: glob passes a NUL-terminated path.
+        let path = unsafe { CStr::from_ptr(p) }.to_bytes();
+        return match f(path) {
+            Ok(d) => d.into_raw() as *mut c_void,
+            Err(e) => {
+                set_errno(-e);
+                std::ptr::null_mut()
+            }
+        };
+    }
     // SAFETY: glob passes a NUL-terminated path.
     unsafe { libc::opendir(p) as *mut c_void }
 }
@@ -983,6 +1010,18 @@ unsafe extern "C" fn stat_hook(p: *const c_char, st: *mut libc::stat) -> c_int {
 /// `safe_glob_full(path, flags, NULL)`: glob() with GLOB_ALTDIRFUNC and
 /// `readdir_no_dot()`, so "." and ".." never match.  (rc, paths, errno).
 pub fn safe_glob_raw(pattern: &[u8], flags: c_int) -> (c_int, Vec<Vec<u8>>, i32) {
+    safe_glob_raw_with(pattern, flags, None)
+}
+
+/// `safe_glob_full(path, flags, opendir_func)`: like `safe_glob_raw()`.
+pub fn safe_glob_raw_with(pattern: &[u8], flags: c_int, opendir: Option<OpendirFn>) -> (c_int, Vec<Vec<u8>>, i32) {
+    let saved = GLOB_OPENDIR.with(|g| g.replace(opendir));
+    let r = safe_glob_inner(pattern, flags);
+    GLOB_OPENDIR.with(|g| g.set(saved));
+    r
+}
+
+fn safe_glob_inner(pattern: &[u8], flags: c_int) -> (c_int, Vec<Vec<u8>>, i32) {
     let c = to_cstring(pattern);
     let mut g = GlobT {
         gl_pathc: 0,
@@ -1128,4 +1167,537 @@ pub fn try_set_comm(name: &[u8]) -> Result<(), i32> {
     buf[..n].copy_from_slice(&name[..n]);
     // SAFETY: buf is NUL-terminated.
     if unsafe { libc::prctl(libc::PR_SET_NAME, buf.as_ptr() as libc::c_ulong) } < 0 { Err(neg_errno()) } else { Ok(()) }
+}
+
+/// `getpwuid_r(uid)`'s `pw_dir`.
+pub fn getpwuid_dir(uid: u32) -> Option<Vec<u8>> {
+    let mut buf = vec![0u8; 16384];
+    // SAFETY: passwd is plain old data.
+    let mut pw: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut res: *mut libc::passwd = std::ptr::null_mut();
+    // SAFETY: all pointers are valid; buf outlives the use of pw.
+    let r = unsafe { libc::getpwuid_r(uid, &mut pw, buf.as_mut_ptr() as *mut c_char, buf.len(), &mut res) };
+    if r != 0 || res.is_null() {
+        return None;
+    }
+    // SAFETY: pw_dir points into buf and is NUL-terminated.
+    Some(unsafe { CStr::from_ptr(pw.pw_dir) }.to_bytes().to_vec())
+}
+
+/// `uname()`'s machine and release.
+pub fn uname_machine_release() -> Result<(Vec<u8>, Vec<u8>), i32> {
+    // SAFETY: utsname is plain old data.
+    let mut u: libc::utsname = unsafe { std::mem::zeroed() };
+    // SAFETY: u is a valid out-pointer.
+    if unsafe { libc::uname(&mut u) } < 0 {
+        return Err(neg_errno());
+    }
+    // SAFETY: both fields are NUL-terminated.
+    unsafe {
+        Ok((
+            CStr::from_ptr(u.machine.as_ptr()).to_bytes().to_vec(),
+            CStr::from_ptr(u.release.as_ptr()).to_bytes().to_vec(),
+        ))
+    }
+}
+
+pub fn getgid() -> u32 {
+    // SAFETY: getgid() has no preconditions.
+    unsafe { libc::getgid() }
+}
+
+/// `statfs(path).f_type`.
+pub fn statfs_type(path: &[u8]) -> Result<i64, i32> {
+    let c = to_cstring(path);
+    // SAFETY: statfs is plain old data; c is NUL-terminated.
+    let mut s: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: as above.
+    if unsafe { libc::statfs(c.as_ptr(), &mut s) } < 0 {
+        return Err(neg_errno());
+    }
+    Ok(s.f_type as i64)
+}
+
+/// `fstatfs(fd).f_type`.
+pub fn fstatfs_type(fd: Fd) -> Result<i64, i32> {
+    // SAFETY: statfs is plain old data.
+    let mut s: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: s is a valid out-pointer.
+    if unsafe { libc::fstatfs(fd, &mut s) } < 0 {
+        return Err(neg_errno());
+    }
+    Ok(s.f_type as i64)
+}
+
+/// `strtoll(s, &end, base)`: (value, bytes consumed, errno).
+pub fn strtoll(s: &[u8], base: c_int) -> (i64, usize, i32) {
+    let c = to_cstring(s);
+    let mut end: *mut c_char = std::ptr::null_mut();
+    set_errno(0);
+    // SAFETY: c is NUL-terminated and end is a valid out-pointer.
+    let v = unsafe { libc::strtoll(c.as_ptr(), &mut end, base) };
+    let e = errno();
+    // SAFETY: end points into c.
+    let consumed = unsafe { end.offset_from(c.as_ptr()) } as usize;
+    (v, consumed, e)
+}
+
+/// Every (name, uid) from a passwd-format file, via `fgetpwent()` (an
+/// error ends the list quietly, as in `populate_uid_cache()`).  Takes fd.
+pub fn fgetpwent_all(fd: Fd) -> Vec<(Vec<u8>, u32)> {
+    // SAFETY: fd is ours; fdopen() takes ownership of it.
+    let f = unsafe { libc::fdopen(fd, c"r".as_ptr()) };
+    if f.is_null() {
+        close(fd);
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    loop {
+        // SAFETY: f is a valid FILE*; the returned record is copied right away.
+        let p = unsafe { fgetpwent(f) };
+        if p.is_null() {
+            break;
+        }
+        // SAFETY: p points to a valid passwd record.
+        unsafe { out.push((CStr::from_ptr((*p).pw_name).to_bytes().to_vec(), (*p).pw_uid)) };
+    }
+    // SAFETY: closing the FILE* we opened.
+    unsafe { libc::fclose(f) };
+    out
+}
+
+/// Every (name, gid) from a group-format file, via `fgetgrent()`.  Takes fd.
+pub fn fgetgrent_all(fd: Fd) -> Vec<(Vec<u8>, u32)> {
+    // SAFETY: fd is ours; fdopen() takes ownership of it.
+    let f = unsafe { libc::fdopen(fd, c"r".as_ptr()) };
+    if f.is_null() {
+        close(fd);
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    loop {
+        // SAFETY: f is a valid FILE*; the returned record is copied right away.
+        let p = unsafe { fgetgrent(f) };
+        if p.is_null() {
+            break;
+        }
+        // SAFETY: p points to a valid group record.
+        unsafe { out.push((CStr::from_ptr((*p).gr_name).to_bytes().to_vec(), (*p).gr_gid)) };
+    }
+    // SAFETY: closing the FILE* we opened.
+    unsafe { libc::fclose(f) };
+    out
+}
+
+/// `getpwnam_r(name)`: Ok(Some((uid, gid))), Ok(None) if absent, Err(-errno).
+pub fn getpwnam_ids(name: &[u8]) -> Result<Option<(u32, u32, Vec<u8>)>, i32> {
+    let n = to_cstring(name);
+    let mut size = 16384usize;
+    loop {
+        let mut buf = vec![0u8; size];
+        // SAFETY: passwd is plain old data.
+        let mut pw: libc::passwd = unsafe { std::mem::zeroed() };
+        let mut res: *mut libc::passwd = std::ptr::null_mut();
+        // SAFETY: all pointers are valid for the call.
+        let r = unsafe { libc::getpwnam_r(n.as_ptr(), &mut pw, buf.as_mut_ptr() as *mut c_char, size, &mut res) };
+        if r == 0 {
+            if res.is_null() {
+                return Ok(None);
+            }
+            // SAFETY: pw_name points into buf.
+            let nm = unsafe { CStr::from_ptr(pw.pw_name) }.to_bytes().to_vec();
+            return Ok(Some((pw.pw_uid, pw.pw_gid, nm)));
+        }
+        if r != libc::ERANGE {
+            return Err(-r);
+        }
+        size *= 2;
+    }
+}
+
+/// `getgrnam_r(name)`: Ok(Some(gid)), Ok(None) if absent, Err(-errno).
+pub fn getgrnam_id(name: &[u8]) -> Result<Option<u32>, i32> {
+    let n = to_cstring(name);
+    let mut size = 16384usize;
+    loop {
+        let mut buf = vec![0u8; size];
+        // SAFETY: group is plain old data.
+        let mut gr: libc::group = unsafe { std::mem::zeroed() };
+        let mut res: *mut libc::group = std::ptr::null_mut();
+        // SAFETY: all pointers are valid for the call.
+        let r = unsafe { libc::getgrnam_r(n.as_ptr(), &mut gr, buf.as_mut_ptr() as *mut c_char, size, &mut res) };
+        if r == 0 {
+            return Ok(if res.is_null() { None } else { Some(gr.gr_gid) });
+        }
+        if r != libc::ERANGE {
+            return Err(-r);
+        }
+        size *= 2;
+    }
+}
+
+/// `getpwuid_r(uid)` existence: Ok(true/false), Err(-errno).
+pub fn getpwuid_exists(uid: u32) -> Result<bool, i32> {
+    let mut buf = vec![0u8; 16384];
+    // SAFETY: passwd is plain old data.
+    let mut pw: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut res: *mut libc::passwd = std::ptr::null_mut();
+    // SAFETY: all pointers are valid for the call.
+    let r = unsafe { libc::getpwuid_r(uid, &mut pw, buf.as_mut_ptr() as *mut c_char, buf.len(), &mut res) };
+    if r != 0 {
+        return Err(-r);
+    }
+    Ok(!res.is_null())
+}
+
+/// `getgrgid_r(gid)` existence: Ok(true/false), Err(-errno).
+pub fn getgrgid_exists(gid: u32) -> Result<bool, i32> {
+    let mut buf = vec![0u8; 16384];
+    // SAFETY: group is plain old data.
+    let mut gr: libc::group = unsafe { std::mem::zeroed() };
+    let mut res: *mut libc::group = std::ptr::null_mut();
+    // SAFETY: all pointers are valid for the call.
+    let r = unsafe { libc::getgrgid_r(gid, &mut gr, buf.as_mut_ptr() as *mut c_char, buf.len(), &mut res) };
+    if r != 0 {
+        return Err(-r);
+    }
+    Ok(!res.is_null())
+}
+
+/// `fd_is_opath()`.
+pub fn fd_is_opath(fd: Fd) -> Result<bool, i32> {
+    // SAFETY: F_GETFL takes no argument.
+    let r = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if r < 0 {
+        return Err(neg_errno());
+    }
+    Ok(r & libc::O_PATH != 0)
+}
+
+/// `getxattr(path, name)` (follow) or `fgetxattr(fd, name)`: the value.
+pub fn getxattr_any(fd: Option<Fd>, path: &[u8], name: &[u8]) -> Result<Vec<u8>, i32> {
+    let n = to_cstring(name);
+    let p = to_cstring(path);
+    let call = |buf: *mut c_void, size: usize| -> isize {
+        // SAFETY: buf is NULL with size 0 or valid for size bytes; names are NUL-terminated.
+        unsafe {
+            match fd {
+                Some(fd) => libc::fgetxattr(fd, n.as_ptr(), buf, size),
+                None => libc::getxattr(p.as_ptr(), n.as_ptr(), buf, size),
+            }
+        }
+    };
+    for _ in 0..7 {
+        let l = call(std::ptr::null_mut(), 0);
+        if l < 0 {
+            return Err(neg_errno());
+        }
+        let mut v = vec![0u8; l as usize + 1];
+        let k = call(v.as_mut_ptr() as *mut c_void, v.len());
+        if k >= 0 {
+            v.truncate(k as usize);
+            return Ok(v);
+        }
+        if errno() != libc::ERANGE {
+            return Err(neg_errno());
+        }
+    }
+    Err(-libc::EBUSY)
+}
+
+/// `setxattr(path, name, value)` (follow) or `fsetxattr(fd, ...)`.
+pub fn setxattr_any(fd: Option<Fd>, path: &[u8], name: &[u8], value: &[u8], flags: c_int) -> Result<(), i32> {
+    let n = to_cstring(name);
+    let p = to_cstring(path);
+    // SAFETY: value is valid for value.len() bytes; names are NUL-terminated.
+    let r = unsafe {
+        match fd {
+            Some(fd) => libc::fsetxattr(fd, n.as_ptr(), value.as_ptr() as *const c_void, value.len(), flags),
+            None => libc::setxattr(p.as_ptr(), n.as_ptr(), value.as_ptr() as *const c_void, value.len(), flags),
+        }
+    };
+    if r < 0 { Err(neg_errno()) } else { Ok(()) }
+}
+
+/// `ioctl(fd, FS_IOC_GETFLAGS)`.
+pub fn fs_ioc_getflags(fd: Fd) -> Result<u32, i32> {
+    let mut v: c_int = 0;
+    // SAFETY: FS_IOC_GETFLAGS writes an int.
+    if unsafe { libc::ioctl(fd, libc::FS_IOC_GETFLAGS, &mut v) } < 0 {
+        return Err(neg_errno());
+    }
+    Ok(v as u32)
+}
+
+/// `ioctl(fd, FS_IOC_SETFLAGS, &v)`.
+pub fn fs_ioc_setflags(fd: Fd, v: u32) -> Result<(), i32> {
+    let v = v as c_int;
+    // SAFETY: FS_IOC_SETFLAGS reads an int.
+    if unsafe { libc::ioctl(fd, libc::FS_IOC_SETFLAGS, &v) } < 0 { Err(neg_errno()) } else { Ok(()) }
+}
+
+/// `statx(dirfd, path, flags, mask)`: the raw result.
+pub fn statx_raw(dirfd: Fd, path: &[u8], flags: c_int, mask: u32) -> Result<libc::statx, i32> {
+    let c = to_cstring(path);
+    // SAFETY: statx is plain old data.
+    let mut sx: libc::statx = unsafe { std::mem::zeroed() };
+    // SAFETY: c is NUL-terminated and sx a valid out-pointer.
+    if unsafe { libc::statx(dirfd, c.as_ptr(), flags, mask, &mut sx) } < 0 {
+        return Err(neg_errno());
+    }
+    Ok(sx)
+}
+
+/// `flock(fd, op)`.
+pub fn flock(fd: Fd, op: c_int) -> Result<(), i32> {
+    // SAFETY: plain syscall.
+    if unsafe { libc::flock(fd, op) } < 0 { Err(neg_errno()) } else { Ok(()) }
+}
+
+/// `futimens(fd, ts)`; None is `UTIME_OMIT`.
+pub fn futimens(fd: Fd, atime_nsec: Option<u64>, mtime_nsec: Option<u64>) -> Result<(), i32> {
+    let t = |v: Option<u64>| match v {
+        Some(n) => libc::timespec { tv_sec: (n / 1_000_000_000) as libc::time_t, tv_nsec: (n % 1_000_000_000) as _ },
+        None => libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_OMIT },
+    };
+    let ts = [t(atime_nsec), t(mtime_nsec)];
+    // SAFETY: ts holds two valid timespecs.
+    if unsafe { libc::futimens(fd, ts.as_ptr()) } < 0 { Err(neg_errno()) } else { Ok(()) }
+}
+
+/// glibc's `fchmodat(fd, path, mode, flags)` (with AT_EMPTY_PATH support).
+pub fn fchmodat_flags(dirfd: Fd, path: &[u8], mode: u32, flags: c_int) -> Result<(), i32> {
+    let c = to_cstring(path);
+    // SAFETY: c is NUL-terminated.
+    if unsafe { libc::fchmodat(dirfd, c.as_ptr(), mode, flags) } < 0 { Err(neg_errno()) } else { Ok(()) }
+}
+
+/// The raw `fchmodat2()` syscall.
+pub fn fchmodat2(dirfd: Fd, path: &[u8], mode: u32, flags: c_int) -> Result<(), i32> {
+    let c = to_cstring(path);
+    // SAFETY: c is NUL-terminated; fchmodat2 takes (int, const char*, mode_t, int).
+    if unsafe { libc::syscall(452, dirfd, c.as_ptr(), mode, flags) } < 0 { Err(neg_errno()) } else { Ok(()) }
+}
+
+/// `chmod(path, mode)`.
+pub fn chmod(path: &[u8], mode: u32) -> Result<(), i32> {
+    let c = to_cstring(path);
+    // SAFETY: c is NUL-terminated.
+    if unsafe { libc::chmod(c.as_ptr(), mode) } < 0 { Err(neg_errno()) } else { Ok(()) }
+}
+
+/// `fchownat(fd, path, uid, gid, flags)`; `u32::MAX` leaves an id alone.
+pub fn fchownat(dirfd: Fd, path: &[u8], uid: u32, gid: u32, flags: c_int) -> Result<(), i32> {
+    let c = to_cstring(path);
+    // SAFETY: c is NUL-terminated.
+    if unsafe { libc::fchownat(dirfd, c.as_ptr(), uid, gid, flags) } < 0 { Err(neg_errno()) } else { Ok(()) }
+}
+
+/// `mknodat(dirfd, path, mode, dev)`.
+pub fn mknodat(dirfd: Fd, path: &[u8], mode: u32, dev: u64) -> Result<(), i32> {
+    let c = to_cstring(path);
+    // SAFETY: c is NUL-terminated.
+    if unsafe { libc::mknodat(dirfd, c.as_ptr(), mode, dev) } < 0 { Err(neg_errno()) } else { Ok(()) }
+}
+
+/// `mkfifoat(dirfd, path, mode)`.
+pub fn mkfifoat(dirfd: Fd, path: &[u8], mode: u32) -> Result<(), i32> {
+    let c = to_cstring(path);
+    // SAFETY: c is NUL-terminated.
+    if unsafe { libc::mkfifoat(dirfd, c.as_ptr(), mode) } < 0 { Err(neg_errno()) } else { Ok(()) }
+}
+
+/// `symlinkat(target, dirfd, path)`.
+pub fn symlinkat(target: &[u8], dirfd: Fd, path: &[u8]) -> Result<(), i32> {
+    let t = to_cstring(target);
+    let c = to_cstring(path);
+    // SAFETY: both are NUL-terminated.
+    if unsafe { libc::symlinkat(t.as_ptr(), dirfd, c.as_ptr()) } < 0 { Err(neg_errno()) } else { Ok(()) }
+}
+
+/// `remove(path)`.
+pub fn remove(path: &[u8]) -> Result<(), i32> {
+    let c = to_cstring(path);
+    // SAFETY: c is NUL-terminated.
+    if unsafe { libc::remove(c.as_ptr()) } < 0 { Err(neg_errno()) } else { Ok(()) }
+}
+
+/// `rmdir(path)`.
+pub fn rmdir(path: &[u8]) -> Result<(), i32> {
+    let c = to_cstring(path);
+    // SAFETY: c is NUL-terminated.
+    if unsafe { libc::rmdir(c.as_ptr()) } < 0 { Err(neg_errno()) } else { Ok(()) }
+}
+
+/// `ftruncate(fd, len)`.
+pub fn ftruncate(fd: Fd, len: i64) -> Result<(), i32> {
+    // SAFETY: plain syscall.
+    if unsafe { libc::ftruncate(fd, len) } < 0 { Err(neg_errno()) } else { Ok(()) }
+}
+
+/// `syncfs(fd)`.
+pub fn syncfs(fd: Fd) -> Result<(), i32> {
+    // SAFETY: plain syscall.
+    if unsafe { libc::syncfs(fd) } < 0 { Err(neg_errno()) } else { Ok(()) }
+}
+
+/// `faccessat(dirfd, path, mode, flags)`.
+pub fn faccessat(dirfd: Fd, path: &[u8], mode: c_int, flags: c_int) -> Result<(), i32> {
+    let c = to_cstring(path);
+    // SAFETY: c is NUL-terminated.
+    if unsafe { libc::faccessat(dirfd, c.as_ptr(), mode, flags) } < 0 { Err(neg_errno()) } else { Ok(()) }
+}
+
+/// `getdents64()` on fd: are there entries other than the ones `skip` matches?
+pub fn dir_has_entry(fd: Fd, skip: &dyn Fn(&[u8]) -> bool) -> Result<bool, i32> {
+    let mut buf = vec![0u8; 16 * 280];
+    loop {
+        // SAFETY: buf is valid for buf.len() bytes.
+        let n = unsafe { libc::syscall(libc::SYS_getdents64, fd, buf.as_mut_ptr(), buf.len()) };
+        if n < 0 {
+            return Err(neg_errno());
+        }
+        if n == 0 {
+            return Ok(false);
+        }
+        let mut off = 0usize;
+        while off < n as usize {
+            // linux_dirent64: d_ino u64, d_off i64, d_reclen u16, d_type u8, d_name[].
+            let reclen = u16::from_ne_bytes([buf[off + 16], buf[off + 17]]) as usize;
+            let name = &buf[off + 19..off + reclen];
+            let name = &name[..name.iter().position(|&b| b == 0).unwrap_or(name.len())];
+            if !skip(name) {
+                return Ok(true);
+            }
+            off += reclen;
+        }
+    }
+}
+
+/// `fstatfs(fd)`: the whole struct.
+pub fn fstatfs(fd: Fd) -> Result<libc::statfs, i32> {
+    // SAFETY: statfs is plain old data.
+    let mut s: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: s is a valid out-pointer.
+    if unsafe { libc::fstatfs(fd, &mut s) } < 0 {
+        return Err(neg_errno());
+    }
+    Ok(s)
+}
+
+/// `ioctl(fd, req, arg)` for the btrfs ioctls, which all take a pointer to
+/// a plain-old-data struct (`T` must be one); returns the ioctl's value.
+pub fn ioctl_ptr<T: Copy>(fd: Fd, req: u64, arg: &mut T) -> Result<c_int, i32> {
+    // SAFETY: arg is a valid, writable T of the size the request encodes.
+    let r = unsafe { libc::ioctl(fd, req as _, arg as *mut T) };
+    if r < 0 { Err(neg_errno()) } else { Ok(r) }
+}
+
+/// `ioctl(fd, req)` with no argument.
+pub fn ioctl_none(fd: Fd, req: u64) -> Result<c_int, i32> {
+    // SAFETY: the request takes no argument.
+    let r = unsafe { libc::ioctl(fd, req as _) };
+    if r < 0 { Err(neg_errno()) } else { Ok(r) }
+}
+
+/// `prctl(PR_CAPBSET_READ, cap)`.
+pub fn capbset_read(cap: i32) -> Result<bool, i32> {
+    // SAFETY: PR_CAPBSET_READ takes an unsigned long and no pointers.
+    let r = unsafe { libc::prctl(libc::PR_CAPBSET_READ, cap as libc::c_ulong, 0, 0, 0) };
+    if r < 0 { Err(neg_errno()) } else { Ok(r > 0) }
+}
+
+/// `flistxattr(fd)`: the NUL-separated names.
+pub fn flistxattr(fd: Fd) -> Result<Vec<u8>, i32> {
+    loop {
+        // SAFETY: a NULL buffer with size 0 asks for the size.
+        let l = unsafe { libc::flistxattr(fd, std::ptr::null_mut(), 0) };
+        if l < 0 {
+            return Err(neg_errno());
+        }
+        let mut v = vec![0u8; l as usize];
+        // SAFETY: v is valid for v.len() bytes.
+        let k = unsafe { libc::flistxattr(fd, v.as_mut_ptr() as *mut c_char, v.len()) };
+        if k >= 0 {
+            v.truncate(k as usize);
+            return Ok(v);
+        }
+        if errno() != libc::ERANGE {
+            return Err(neg_errno());
+        }
+    }
+}
+
+/// `utimensat(dirfd, path, {atime, mtime}, flags)`, nanosecond timestamps.
+pub fn utimensat(dirfd: Fd, path: &[u8], atime: (i64, i64), mtime: (i64, i64), flags: c_int) -> Result<(), i32> {
+    let c = to_cstring(path);
+    let ts = [
+        libc::timespec { tv_sec: atime.0 as libc::time_t, tv_nsec: atime.1 as _ },
+        libc::timespec { tv_sec: mtime.0 as libc::time_t, tv_nsec: mtime.1 as _ },
+    ];
+    // SAFETY: c is NUL-terminated and ts holds two timespecs.
+    if unsafe { libc::utimensat(dirfd, c.as_ptr(), ts.as_ptr(), flags) } < 0 { Err(neg_errno()) } else { Ok(()) }
+}
+
+/// `futimens(fd, {atime, mtime})`, nanosecond timestamps.
+pub fn futimens_ts(fd: Fd, atime: (i64, i64), mtime: (i64, i64)) -> Result<(), i32> {
+    let ts = [
+        libc::timespec { tv_sec: atime.0 as libc::time_t, tv_nsec: atime.1 as _ },
+        libc::timespec { tv_sec: mtime.0 as libc::time_t, tv_nsec: mtime.1 as _ },
+    ];
+    // SAFETY: ts holds two timespecs.
+    if unsafe { libc::futimens(fd, ts.as_ptr()) } < 0 { Err(neg_errno()) } else { Ok(()) }
+}
+
+/// `linkat(olddir, old, newdir, new, flags)`.
+pub fn linkat(olddir: Fd, old: &[u8], newdir: Fd, new: &[u8], flags: c_int) -> Result<(), i32> {
+    let o = to_cstring(old);
+    let n = to_cstring(new);
+    // SAFETY: both are NUL-terminated.
+    if unsafe { libc::linkat(olddir, o.as_ptr(), newdir, n.as_ptr(), flags) } < 0 { Err(neg_errno()) } else { Ok(()) }
+}
+
+/// `fchown(fd, uid, gid)`.
+pub fn fchown(fd: Fd, uid: u32, gid: u32) -> Result<(), i32> {
+    // SAFETY: plain syscall.
+    if unsafe { libc::fchown(fd, uid, gid) } < 0 { Err(neg_errno()) } else { Ok(()) }
+}
+
+/// `ioctl(outfd, FICLONE, infd)`.
+pub fn ficlone(outfd: Fd, infd: Fd) -> Result<(), i32> {
+    // SAFETY: FICLONE takes the source fd as its argument.
+    if unsafe { libc::ioctl(outfd, libc::FICLONE as _, infd) } < 0 { Err(neg_errno()) } else { Ok(()) }
+}
+
+/// `copy_file_range(infd, NULL, outfd, NULL, len, 0)`.
+pub fn copy_file_range(infd: Fd, outfd: Fd, len: usize) -> Result<usize, i32> {
+    // SAFETY: NULL offsets use and advance the file positions.
+    let n = unsafe { libc::copy_file_range(infd, std::ptr::null_mut(), outfd, std::ptr::null_mut(), len, 0) };
+    if n < 0 { Err(neg_errno()) } else { Ok(n as usize) }
+}
+
+/// The SIGPIPE disposition the process was started with, recorded before
+/// Rust's runtime sets it to SIG_IGN (usize::MAX: not recorded).
+static INHERITED_SIGPIPE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(usize::MAX);
+
+extern "C" fn record_sigpipe() {
+    // SAFETY: sigaction with a NULL new action only reads the current one.
+    let mut old: libc::sigaction = unsafe { std::mem::zeroed() };
+    // SAFETY: old is a valid out-pointer.
+    if unsafe { libc::sigaction(libc::SIGPIPE, std::ptr::null(), &mut old) } == 0 {
+        INHERITED_SIGPIPE.store(old.sa_sigaction, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Runs before main(), and so before the Rust runtime's own setup.
+#[used]
+#[unsafe(link_section = ".init_array")]
+static RECORD_SIGPIPE: extern "C" fn() = record_sigpipe;
+
+/// Put SIGPIPE back the way it was inherited, as a C program has it.
+pub fn restore_inherited_sigpipe() {
+    let h = INHERITED_SIGPIPE.load(std::sync::atomic::Ordering::Relaxed);
+    let h = if h == usize::MAX { libc::SIG_DFL } else { h };
+    // SAFETY: h is SIG_DFL, SIG_IGN or the handler we were started with.
+    unsafe { libc::signal(libc::SIGPIPE, h) };
 }

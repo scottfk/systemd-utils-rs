@@ -26,9 +26,9 @@ A drop-in port/reimplementation of Gentoo's systemd-utils (udev, libudev, hwdb, 
 
 ## Status
 
-Phase 1 is done: `systemd-sysctl` is ported, along with the shared code the
-later phases build on (see the layout below). 330 differential cases match the
-C build.
+Phases 1 and 2 are done: `systemd-sysctl` and `systemd-tmpfiles` are ported,
+along with the shared code the later phases build on (see the layout below).
+330 sysctl and 893 tmpfiles differential cases match the C build.
 
 The reference is upstream's tag `v262` (its sources are the same as the release
 tarball's), built as Gentoo builds it ([tools/build-reference.sh](tools/build-reference.sh)):
@@ -46,8 +46,9 @@ same 12 programs, the same exported libudev symbols on both ABIs (92 functions i
 
 | Path | What |
 |---|---|
-| `crates/shared` | ports of the `src/basic`, `src/shared` and `src/libsystemd` code the programs use, one module per C file: logging (`log.c`), the 262 option parser and `--help` tables (`options.c`, `verbs.c`, `format-table.c`), `--introspect-cli` JSON (`sd-json.c`), the pager, conf-files and `--cat-config`, `chase.c`, `fileio.c`, path and string helpers.  All `unsafe` is in `sys.rs`. |
+| `crates/shared` | ports of the `src/basic`, `src/shared` and `src/libsystemd` code the programs use, one module per C file: logging (`log.c`), the 262 option parser and `--help` tables (`options.c`, `verbs.c`, `format-table.c`), `--introspect-cli` JSON (`sd-json.c`), the pager, conf-files and `--cat-config`, `chase.c`, `fileio.c`, path and string helpers; for tmpfiles also specifiers, `sd-path`, ACLs (`acl-util.c`, libacl `dlopen()`ed), xattrs, `chattr`, btrfs subvolumes and qgroups, `rm-rf.c`, `copy.c`, capabilities and credentials.  All `unsafe` is in `sys.rs` (and the libacl calls in `sys_acl.rs`). |
 | `crates/sysctl` | `systemd-sysctl` (`src/sysctl/sysctl.c`) |
+| `crates/tmpfiles` | `systemd-tmpfiles` (`src/tmpfiles/tmpfiles.c`, `offline-passwd.c`) |
 | `tests/common` | the differential harness, shared by every crate's tests |
 | `tests/shim` | the LD_PRELOAD clock |
 | `tools` | the reference build |
@@ -66,6 +67,17 @@ isn't possible or isn't worth it:
   a `user-UID.slice` in the process's own cgroup. Without systemd, both find
   no owner.
 - `$NOTIFY_SOCKET` doesn't support AF_VSOCK addresses.
+- `systemd-tmpfiles --image=` isn't supported: it fails with "Operating on
+  disk image '…' is not supported." (after the same argument checks as C), and
+  `--image-policy=` is accepted without being parsed. Use `--root=` on a
+  mounted image instead.
+- tmpfiles handles the items below a path (for `--remove`, `--clean` and
+  `--purge`) in the order they were read. C keeps them in a hash set whose order
+  changes from run to run, so this is one of the orders C uses.
+- tmpfiles' `C` lines copy with `copy.c`'s behavior for what tmpfiles asks for
+  (merging, hard links, `user.*` xattrs, owners, modes and times), not all of
+  `copy.c`; and `inode_same_at()` compares `fstat()` results where C compares
+  file handles, which gives the same answers.
 
 ## What gets ported
 
@@ -89,7 +101,7 @@ init scripts are installed unchanged.
 ## Testing
 
 `make check` builds the C reference into `../systemd` if it isn't there,
-then runs the test suites (so far, phase 1's differential cases):
+then runs the test suites (so far, the differential cases of phases 1 and 2):
 
 1. **Differential tests.** Each case runs the C program and the port on copies of the
    same tree, and compares the exit status, stdout, stderr, what was logged, and every
@@ -97,12 +109,17 @@ then runs the test suites (so far, phase 1's differential cases):
    - As in [cronie-rs](https://github.com/scottfk/cronie-rs) and
      [logrotate-rs](https://github.com/scottfk/logrotate-rs), each run is in a private
      user and mount namespace with real users mapped from your subordinate ids, and an
-     LD_PRELOAD clock (log timestamps now, file ages for `tmpfiles --clean` later).
+     LD_PRELOAD clock (log timestamps, and the file ages for `tmpfiles --clean`).
    - The sandbox mirrors the real paths: the case's `/etc/sysctl.d`, `/run`,
      `/usr/lib/sysctl.d`, `/usr/local/lib` and a fake `/proc/sys` (plain files) are
      bound over the real ones, so messages name the paths a user would see.
    - `/dev/log`, `/dev/kmsg` and the journal socket are captured, so every log target
      is compared; cases can also run on a pty (colors, the pager) or as another user.
+   - tmpfiles cases run on a root of the sandbox's own (a tmpfs `/` with the system
+     directories bound in), because the real `/` belongs to a user the sandbox can't
+     map, and `CHASE_SAFE` refuses that transition. They also compare xattrs, ACLs,
+     file capabilities, `lsattr` flags, link counts and timestamps, and hydra's btrfs
+     root means `v`, `q` and `Q` lines make real subvolumes.
    - `SYSTEMD_DIFF_SHOW=1 cargo test -- --nocapture` prints each case's outcome.
    - udev cases run on a fake sysfs (as upstream's own udev tests do) with a private
      `/run/udev` and `/dev`, through `udevadm test`, `udevadm info` and the libudev API

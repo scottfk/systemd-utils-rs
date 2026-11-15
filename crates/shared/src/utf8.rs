@@ -220,3 +220,23 @@ pub fn console_width(s: &[u8]) -> usize {
     }
     n
 }
+
+/// `utf8_escape_invalid()`: invalid bytes become U+FFFD.
+pub fn escape_invalid(s: &[u8]) -> Vec<u8> {
+    let s = crate::bytes::c_str_prefix(s);
+    let mut out = Vec::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        match encoded_valid_unichar(&s[i..]) {
+            Some(n) => {
+                out.extend_from_slice(&s[i..i + n]);
+                i += n;
+            }
+            None => {
+                out.extend_from_slice(b"\xef\xbf\xbd");
+                i += 1;
+            }
+        }
+    }
+    out
+}

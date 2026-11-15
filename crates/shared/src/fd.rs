@@ -75,7 +75,7 @@ pub fn dir_fd_is_root(dir_fd: i32) -> Result<bool, i32> {
 }
 
 /// `proc_fd_enoent_errno()`: ENOENT on /proc/self/fd means /proc is missing.
-fn proc_fd_enoent_errno() -> i32 {
+pub fn proc_fd_enoent_errno() -> i32 {
     match sys::stat(b"/proc/self/fd/") {
         Err(e) if e == -libc::ENOENT => -libc::ENOSYS,
         _ => -libc::EBADF,
