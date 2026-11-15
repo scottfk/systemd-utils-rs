@@ -26,7 +26,9 @@ A drop-in port/reimplementation of Gentoo's systemd-utils (udev, libudev, hwdb, 
 
 ## Status
 
-Just started: project docs and the reference build. No code yet.
+Phase 1 is done: `systemd-sysctl` is ported, along with the shared code the
+later phases build on (see the layout below). 330 differential cases match the
+C build.
 
 The reference is upstream's tag `v262` (its sources are the same as the release
 tarball's), built as Gentoo builds it ([tools/build-reference.sh](tools/build-reference.sh)):
@@ -39,6 +41,31 @@ tarball's), built as Gentoo builds it ([tools/build-reference.sh](tools/build-re
 The build matches the installed package: the same `--version` feature string, the
 same 12 programs, the same exported libudev symbols on both ABIs (92 functions in
 6 version nodes, `LIBUDEV_183` to `LIBUDEV_247`) and the same linked libraries.
+
+## Layout
+
+| Path | What |
+|---|---|
+| `crates/shared` | ports of the `src/basic`, `src/shared` and `src/libsystemd` code the programs use, one module per C file: logging (`log.c`), the 262 option parser and `--help` tables (`options.c`, `verbs.c`, `format-table.c`), `--introspect-cli` JSON (`sd-json.c`), the pager, conf-files and `--cat-config`, `chase.c`, `fileio.c`, path and string helpers.  All `unsafe` is in `sys.rs`. |
+| `crates/sysctl` | `systemd-sysctl` (`src/sysctl/sysctl.c`) |
+| `tests/common` | the differential harness, shared by every crate's tests |
+| `tests/shim` | the LD_PRELOAD clock |
+| `tools` | the reference build |
+
+### Known differences
+
+Things the port does differently from C on purpose, because matching them
+isn't possible or isn't worth it:
+
+- `SYSTEMD_LOG_LOCATION=1` and the journal's `CODE_FILE=`/`CODE_LINE=`
+  name the Rust source, not the C source.
+- `detect_container()` isn't ported. In a container, PID 1 and programs
+  started with `$SYSTEMD_EXEC_PID` read the kernel command line from
+  `/proc/cmdline` rather than from PID 1's argv.
+- `sd_pid_get_owner_uid()` (used for the pager's secure mode) only looks for
+  a `user-UID.slice` in the process's own cgroup. Without systemd, both find
+  no owner.
+- `$NOTIFY_SOCKET` doesn't support AF_VSOCK addresses.
 
 ## What gets ported
 
@@ -59,9 +86,10 @@ ports, which is why the roadmap is in small steps.
 Data files (rules, hwdb sources, `.link`, `tmpfiles.d`, `sysctl.d`) and Gentoo's
 init scripts are installed unchanged.
 
-## Testing (planned)
+## Testing
 
-`make check` will build the C reference into `../systemd` if it isn't there, then:
+`make check` builds the C reference into `../systemd` if it isn't there,
+then runs the test suites (so far, phase 1's differential cases):
 
 1. **Differential tests.** Each case runs the C program and the port on copies of the
    same tree, and compares the exit status, stdout, stderr, what was logged, and every
@@ -69,7 +97,13 @@ init scripts are installed unchanged.
    - As in [cronie-rs](https://github.com/scottfk/cronie-rs) and
      [logrotate-rs](https://github.com/scottfk/logrotate-rs), each run is in a private
      user and mount namespace with real users mapped from your subordinate ids, and an
-     LD_PRELOAD clock where ages matter (`tmpfiles --clean`).
+     LD_PRELOAD clock (log timestamps now, file ages for `tmpfiles --clean` later).
+   - The sandbox mirrors the real paths: the case's `/etc/sysctl.d`, `/run`,
+     `/usr/lib/sysctl.d`, `/usr/local/lib` and a fake `/proc/sys` (plain files) are
+     bound over the real ones, so messages name the paths a user would see.
+   - `/dev/log`, `/dev/kmsg` and the journal socket are captured, so every log target
+     is compared; cases can also run on a pty (colors, the pager) or as another user.
+   - `SYSTEMD_DIFF_SHOW=1 cargo test -- --nocapture` prints each case's outcome.
    - udev cases run on a fake sysfs (as upstream's own udev tests do) with a private
      `/run/udev` and `/dev`, through `udevadm test`, `udevadm info` and the libudev API
      (a small C probe linked against each `libudev.so.1`).
