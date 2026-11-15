@@ -9,4 +9,8 @@ Severity: **high** means it can expose a device or a file to the wrong user, del
 clobber the wrong file, or leave the system without a working `/dev`; **medium** means
 it's surprising and user-visible; **low** means it's cosmetic or hard to hit.
 
-Nothing is listed yet: the port hasn't started.
+## systemd-sysctl
+
+| Severity | Quirk |
+|---|---|
+| medium | With `--save=`, the result of saving replaces the result of parsing the files given, so a file that couldn't be read (or another parse error) no longer makes the run fail if saving works. Without `--save=` the same error gives exit status 1. |
