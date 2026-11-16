@@ -187,3 +187,82 @@ pub fn cat_files_full(file: Option<&ConfFile>, dropins: &[ConfFile], flags: u32)
     }
     ret
 }
+
+/// `guess_type()`: (name, prefixes, is_collection, extension).
+fn guess_type(name: &[u8]) -> (Vec<u8>, Vec<Vec<u8>>, bool, &'static [u8]) {
+    let name: &[u8] = if path_equal(name, b"environment.d") { b"environment" } else { name };
+    let n = crate::string::delete_trailing_chars(name, Some(b"/")).to_vec();
+    let mut coll = n.ends_with(b".d");
+    let mut run = false;
+    let mut ext: &[u8] = b".conf";
+    if path_equal(&n, b"udev/hwdb.d") {
+        ext = b".hwdb";
+    } else if path_equal(&n, b"udev/rules.d") {
+        ext = b".rules";
+    } else if path_equal(&n, b"kernel/install.d") {
+        ext = b".install";
+    } else if path_equal(&n, b"systemd/ntp-units.d") {
+        coll = true;
+        ext = b".list";
+    } else if path_equal(&n, b"systemd/relabel-extra.d") {
+        coll = true;
+        run = true;
+        ext = b".relabel";
+    } else if [&b"systemd/system-preset"[..], b"systemd/user-preset", b"systemd/initrd-preset"]
+        .iter()
+        .any(|p| path_equal(&n, p))
+    {
+        coll = true;
+        ext = b".preset";
+    }
+    let prefixes = if run { vec![b"/run/".to_vec()] } else { crate::conf_files::conf_paths("") };
+    (name.to_vec(), prefixes, coll, ext)
+}
+
+/// `conf_files_cat(root, name, flags)`.
+pub fn conf_files_cat(root: Option<&[u8]>, name: &[u8], mut flags: u32) -> i32 {
+    let (name, prefixes, is_collection, extension) = guess_type(name);
+    let dirs: Vec<Vec<u8>> =
+        prefixes.iter().map(|p| crate::bcat!(p, &name, if is_collection { "" } else { ".d" })).collect();
+    if crate::log::debug_logging() {
+        crate::log_debug!("Looking for configuration in:");
+        if !is_collection {
+            for p in &prefixes {
+                crate::log_debug!("   ", root.unwrap_or_default(), p, &name);
+            }
+        }
+        for t in &dirs {
+            crate::log_debug!("   ", root.unwrap_or_default(), t, "/*", extension);
+        }
+    }
+    let mut c = None;
+    if !is_collection {
+        for p in &prefixes {
+            let path = crate::path::path_join(&[p, &name]);
+            match conf_file_new(&path, root, CONF_FILES_REGULAR | CONF_FILES_FILTER_MASKED) {
+                Ok(x) => {
+                    c = Some(x);
+                    break;
+                }
+                Err(r) if r == -libc::ERFKILL => break,
+                Err(_) => {}
+            }
+        }
+        if c.is_none() {
+            printo!(ansi::highlight_magenta(), "# Main configuration file ", &name, " not found", ansi::normal(), "\n");
+        }
+    }
+    let dropins = match crate::conf_files::conf_files_list_strv_full(
+        Some(extension),
+        root,
+        CONF_FILES_REGULAR | CONF_FILES_FILTER_MASKED | CONF_FILES_WARN,
+        &dirs,
+    ) {
+        Ok(d) => d,
+        Err(r) => return log_error_errno!(r, "Failed to query file list: ", strerror(r)),
+    };
+    if is_collection {
+        flags |= CAT_FORMAT_HAS_SECTIONS;
+    }
+    cat_files_full(c.as_ref(), &dropins, flags)
+}

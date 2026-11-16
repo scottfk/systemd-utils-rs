@@ -543,3 +543,35 @@ pub fn set_file(path: &[u8], ty: c_uint, acl: &Acl) -> Result<(), i32> {
     }
     Ok(())
 }
+
+/// `dlopen_safe(filename, &dl, &dle)` for a library that's only probed:
+/// Ok if it loads (it's closed again), else (-errno, dlerror text).
+pub fn dlopen_probe(filename: &[u8]) -> Result<(), (i32, Option<Vec<u8>>)> {
+    let blocked = DLOPEN_BLOCKED.load(std::sync::atomic::Ordering::Relaxed);
+    let mut flags = libc::RTLD_NOW | libc::RTLD_NODELETE;
+    if blocked {
+        flags |= libc::RTLD_NOLOAD;
+    }
+    let name = crate::bytes::to_cstring(filename);
+    sys::set_errno(0);
+    // SAFETY: name is NUL-terminated.
+    let dl = unsafe { libc::dlopen(name.as_ptr(), flags) };
+    if dl.is_null() {
+        if blocked {
+            let _ = dlerror_text();
+            let r = crate::log_debug_errno!(
+                synthetic(libc::EPERM),
+                "Refusing loading of '",
+                filename,
+                "', as loading further dlopen() modules has been blocked."
+            );
+            return Err((r, None));
+        }
+        let e = crate::errno::errno_or_else(libc::ENOPKG);
+        let dle = dlerror_text();
+        return Err((e, if dle.is_empty() { None } else { Some(dle) }));
+    }
+    // SAFETY: closing the handle dlopen() returned.
+    unsafe { libc::dlclose(dl) };
+    Ok(())
+}

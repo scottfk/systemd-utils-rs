@@ -212,3 +212,80 @@ pub fn parse_time(t: &[u8], default_unit: u64) -> Result<u64, i32> {
 pub fn parse_sec(t: &[u8]) -> Result<u64, i32> {
     parse_time(t, USEC_PER_SEC)
 }
+
+/// `now(CLOCK_MONOTONIC)`.
+pub fn now_monotonic() -> u64 {
+    crate::sys::clock_usec(libc::CLOCK_MONOTONIC)
+}
+
+/// `FORMAT_TIMESPAN(t, accuracy)` (`FORMAT_TIMESPAN_MAX` bytes).
+pub fn format_timespan(mut t: u64, accuracy: u64) -> Vec<u8> {
+    const TABLE: [(&str, u64); 9] = [
+        ("y", USEC_PER_YEAR),
+        ("month", USEC_PER_MONTH),
+        ("w", USEC_PER_WEEK),
+        ("d", USEC_PER_DAY),
+        ("h", USEC_PER_HOUR),
+        ("min", USEC_PER_MINUTE),
+        ("s", USEC_PER_SEC),
+        ("ms", USEC_PER_MSEC),
+        ("us", 1),
+    ];
+    if t == USEC_INFINITY {
+        return b"infinity".to_vec();
+    }
+    if t == 0 {
+        return b"0".to_vec();
+    }
+    let mut out: Vec<u8> = Vec::new();
+    let mut l: usize = 64;
+    let mut something = false;
+    for (suffix, usec) in TABLE {
+        if t == 0 {
+            break;
+        }
+        if t < accuracy && something {
+            break;
+        }
+        if t < usec {
+            continue;
+        }
+        if l <= 1 {
+            break;
+        }
+        let a = t / usec;
+        let mut b = t % usec;
+        let sep = if out.is_empty() { "" } else { " " };
+        let mut piece = None;
+        if t < USEC_PER_MINUTE && b > 0 {
+            let mut j: i32 = 0;
+            let mut cc = usec;
+            while cc > 1 {
+                j += 1;
+                cc /= 10;
+            }
+            let mut cc = accuracy;
+            while cc > 1 {
+                b /= 10;
+                j -= 1;
+                cc /= 10;
+            }
+            if j > 0 {
+                piece = Some(format!("{sep}{a}.{b:0width$}{suffix}", width = j as usize));
+                t = 0;
+            }
+        }
+        let piece = match piece {
+            Some(p) => p,
+            None => {
+                t = b;
+                format!("{sep}{a}{suffix}")
+            }
+        };
+        let n = piece.len().min(l - 1);
+        out.extend_from_slice(&piece.as_bytes()[..n]);
+        l -= n;
+        something = true;
+    }
+    out
+}

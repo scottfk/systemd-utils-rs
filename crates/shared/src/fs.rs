@@ -222,3 +222,71 @@ pub fn mkfifoat_atomic(dir_fd: i32, path: &[u8], mode: u32) -> Result<(), i32> {
 pub fn symlinkat_atomic(target: &[u8], atfd: i32, linkpath: &[u8]) -> Result<(), i32> {
     create_atomic(atfd, linkpath, |t| sys::symlinkat(target, atfd, t))
 }
+
+/// `open_mkdir(path, flags, mode)` (`open_mkdir_at_full(AT_FDCWD, ...)`).
+pub fn open_mkdir(path: &[u8], flags: i32, mode: u32) -> Result<OwnedFd, i32> {
+    if path.is_empty() {
+        return Err(-libc::EINVAL);
+    }
+    match sys::mkdirat(AT_FDCWD, path, mode) {
+        Ok(()) => {}
+        Err(e) if e == -libc::EEXIST && flags & libc::O_EXCL == 0 => {}
+        Err(e) => return Err(e),
+    }
+    let fd = sys::openat(AT_FDCWD, path, (flags & !libc::O_EXCL) | libc::O_DIRECTORY | libc::O_NOFOLLOW, 0)?;
+    Ok(OwnedFd::new(fd))
+}
+
+/// `fchmod_and_chown(fd, mode, uid, gid)`: in an order that never makes
+/// the node more accessible than before or after.
+pub fn fchmod_and_chown(fd: i32, mode: u32, uid: u32, gid: u32) -> Result<(), i32> {
+    let st = sys::fstat(fd)?;
+    let do_chown = (uid != u32::MAX && st.st_uid != uid) || (gid != u32::MAX && st.st_gid != gid);
+    let is_lnk = st.st_mode & libc::S_IFMT == libc::S_IFLNK;
+    let do_chmod = !is_lnk && ((mode != u32::MAX && ((st.st_mode ^ mode) & 0o7777) != 0) || do_chown);
+    let mode = if mode == u32::MAX {
+        st.st_mode
+    } else if (mode & libc::S_IFMT) != 0 && ((mode ^ st.st_mode) & libc::S_IFMT) != 0 {
+        return Err(-libc::EINVAL);
+    } else {
+        mode
+    };
+    if do_chown && do_chmod {
+        let minimal = st.st_mode & mode;
+        if ((minimal ^ st.st_mode) & 0o7777) != 0 {
+            crate::stat_util::fchmod_opath(fd, minimal & 0o7777)?;
+        }
+    }
+    if do_chown {
+        sys::fchownat(fd, b"", uid, gid, libc::AT_EMPTY_PATH)?;
+    }
+    if do_chmod {
+        crate::stat_util::fchmod_opath(fd, mode & 0o7777)?;
+    }
+    Ok(())
+}
+
+/// `touch_file(path, parents, USEC_INFINITY, uid, gid, mode)`.
+pub fn touch_file(path: &[u8], parents: bool, _stamp: u64, uid: u32, gid: u32, mode: u32) -> Result<(), i32> {
+    if parents {
+        let _ = mkdirat_parents(AT_FDCWD, path, 0o755);
+    }
+    let fd = match sys::open(path, libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW, 0) {
+        Ok(fd) => fd,
+        Err(e) if e != -libc::ENOENT => return Err(e),
+        Err(_) => sys::open(
+            path,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC,
+            if mode == 0 || mode == u32::MAX { 0o644 } else { mode },
+        )?,
+    };
+    let fd = OwnedFd::new(fd);
+    let mut ret = 0;
+    if let Err(e) = fchmod_and_chown(fd.raw(), mode, uid, gid) {
+        ret = e;
+    }
+    if let Err(e) = sys::futimens_opath(fd.raw()) {
+        crate::errno::ret_gather(&mut ret, e);
+    }
+    if ret < 0 { Err(ret) } else { Ok(()) }
+}

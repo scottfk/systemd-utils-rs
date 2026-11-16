@@ -2,6 +2,7 @@
 #
 # 20261115 - Created by Claude (claude.ai, Anthropic) - scottfk
 # 20261116 - Link libudev.so.1 in the release build; libudev32 target - Claude - scottfk
+# 20261116 - reference: also the C test-udev-rule-runner - Claude - scottfk
 #
 #   make              release build (target/release/, and
 #                     target/release/libudev/libudev.so.1)
@@ -28,6 +29,7 @@ libudev32:
 
 reference:
 	@if [ ! -x $(REFERENCE)/build/systemd-sysctl ]; then tools/build-reference.sh $(REFERENCE); fi
+	@if [ ! -x $(REFERENCE)/build/test-udev-rule-runner ]; then tools/build-rule-runner.sh $(REFERENCE); fi
 
 check: reference
 	SYSTEMD_REFERENCE=$(abspath $(REFERENCE)) $(CARGO) test

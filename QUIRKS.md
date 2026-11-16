@@ -39,3 +39,11 @@ it's surprising and user-visible; **low** means it's cosmetic or hard to hit.
 | low | The enumerator's rule that a sound card's `controlC` device sorts after its other devices never applies: it looks for the `/` from the start of the devpath instead of after `/sound/card`. |
 | low | `udev_monitor_filter_add_match_subsystem_devtype()` adds a filter on every call, the same subsystem and devtype again included (the filters are keyed by pointer), so the BPF program grows each time. |
 | low | `udev_device_new_from_devnum()` with a type other than `b` or `c` logs (at debug level) the macro expansion of `IN_SET(type, 'b', 'c')` as the failed assertion's text, since `assert_return()` stringifies its argument after expansion. |
+
+## udevadm and the rules engine
+
+| Severity | Quirk |
+|---|---|
+| low | The labels and commands an event queues are kept in maps keyed by the strings' addresses, so nothing is ever a duplicate: `RUN+="x"` twice runs `x` twice, and `SECLABEL{selinux}+=` twice keeps both labels (applied in order, the last one wins). |
+| low | One invalid key in a rule line drops the whole line, the valid keys before it included. |
+| low | When `IMPORT{file}` or `IMPORT{program}` can't parse a line, the debug message shows the line as the parser left it: cut at the `=` and with the key's trailing whitespace removed (`FOO="x'` is logged as `FOO`). |

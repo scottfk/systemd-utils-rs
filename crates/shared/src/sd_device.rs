@@ -140,6 +140,9 @@ const ACTIONS: [(Action, &str); 8] = [
     (Action::Unbind, "unbind"),
 ];
 
+/// The action names, in table order (`DUMP_STRING_TABLE(device_action, ...)`).
+pub const DEVICE_ACTION_NAMES: &[&str] = &["add", "remove", "change", "move", "online", "offline", "bind", "unbind"];
+
 /// `device_action_to_string()`.
 pub fn device_action_to_string(a: Action) -> &'static str {
     ACTIONS.iter().find(|(x, _)| *x == a).map(|(_, s)| *s).expect("every action is in the table")
@@ -2593,4 +2596,299 @@ impl Device {
         }
         self.is_devtype(devtype)
     }
+}
+
+/// `log_device_full_errno_zerook(device, level, error, ...)` for a device
+/// that may be NULL.
+pub fn log_device_full(dev: Option<&Device>, level: i32, error: i32, msg: Vec<u8>) -> i32 {
+    if !crate::log::enabled(level) {
+        return -crate::errno::errno_value(error);
+    }
+    let sysname = dev.and_then(|d| d.get_sysname().ok());
+    crate::log::log_object_internal(
+        level,
+        error,
+        crate::log::Loc { file: file!(), line: line!(), func: "" },
+        sysname.as_ref().map(|s| (&b"DEVICE="[..], s.bytes())),
+        msg,
+    )
+}
+
+// device-private.c: the parts udevd and the rule runner write with.
+impl Device {
+    /// `sd_device_get_trigger_uuid()`: `SYNTH_UUID`, as a UUID string.
+    pub fn get_trigger_uuid(&self) -> Result<Vec<u8>, i32> {
+        let v = self.get_property_value(b"SYNTH_UUID")?;
+        let hex: Vec<u8> = v.bytes().iter().copied().filter(|&c| c != b'-').collect();
+        if hex.len() != 32 || !hex.iter().all(u8::is_ascii_hexdigit) {
+            return Err(-libc::EINVAL);
+        }
+        let h = hex.to_ascii_lowercase();
+        if h.iter().all(|&c| c == b'0') {
+            return Err(-libc::ENOENT);
+        }
+        Ok(crate::bcat!(&h[0..8], "-", &h[8..12], "-", &h[12..16], "-", &h[16..20], "-", &h[20..32]))
+    }
+
+    /// `device_clone_with_db()`.
+    pub fn clone_with_db(&self) -> Result<Dev, i32> {
+        let dest = Device::new_aux();
+        dest.st().sealed = true;
+        let syspath = self.st().syspath.clone().ok_or(-libc::EINVAL)?;
+        dest.set_syspath(syspath.bytes(), false)?;
+        let props: Vec<(DStr, DStr)> = self.st().properties.v.clone();
+        for (key, val) in &props {
+            if key.bytes() == b"MINOR" {
+                continue;
+            }
+            if key.bytes() == b"MAJOR" {
+                let minor = props.iter().find(|(k, _)| k.bytes() == b"MINOR").map(|(_, v)| v.bytes().to_vec());
+                dest.set_devnum(val.bytes(), minor.as_deref())?;
+            } else {
+                dest.amend(key.bytes(), val.bytes())?;
+            }
+            if key.bytes() == b"SUBSYSTEM" && val.bytes() == b"drivers" {
+                let ds = self.st().driver_subsystem.clone();
+                dest.st().driver_subsystem = ds;
+            }
+        }
+        dest.read_db_internal(true)?;
+        Ok(dest)
+    }
+
+    /// `device_copy_all_tags(dest, src)`.
+    pub fn copy_all_tags(&self, src: Option<&Device>) -> Result<(), i32> {
+        let Some(src) = src else { return Ok(()) };
+        for tag in src.tags() {
+            self.add_tag(tag.bytes(), false)?;
+        }
+        Ok(())
+    }
+
+    /// `device_cleanup_tags(device, original)`.
+    pub fn cleanup_tags(&self, original: Option<&Device>) -> Result<(), i32> {
+        let saved = {
+            let mut s = self.st();
+            let saved = std::mem::take(&mut s.all_tags);
+            s.current_tags.clear();
+            s.property_tags_outdated = true;
+            s.tags_generation += 1;
+            saved
+        };
+        if let Err(r) = self.copy_all_tags(original) {
+            self.st().all_tags = saved;
+            return Err(r);
+        }
+        Ok(())
+    }
+
+    /// `device_cleanup_devlinks()`.
+    pub fn cleanup_devlinks(&self) {
+        let mut s = self.st();
+        s.devlinks.clear();
+        s.property_devlinks_outdated = true;
+        s.devlinks_generation += 1;
+    }
+
+    /// `device_remove_tag()`.
+    pub fn remove_tag(&self, tag: &[u8]) {
+        let mut s = self.st();
+        s.current_tags.remove(&DStr::new(tag));
+        s.property_tags_outdated = true;
+        s.tags_generation += 1;
+    }
+
+    /// `device_tag(device, tag, add)`.
+    fn tag(&self, tag: &[u8], add: bool) -> Result<(), i32> {
+        let id = self.get_device_id()?;
+        let path = crate::bcat!("/run/udev/tags/", tag, "/", id.bytes());
+        if add {
+            return crate::fs::touch_file(&path, true, u64::MAX, u32::MAX, u32::MAX, 0o444);
+        }
+        match sys::unlinkat(crate::fd::AT_FDCWD, &path, 0) {
+            Err(r) if r != -libc::ENOENT => Err(r),
+            _ => Ok(()),
+        }
+    }
+
+    /// `device_tag_index(device, add)`.
+    pub fn tag_index(&self, add: bool) -> Result<(), i32> {
+        let mut r = 0;
+        for tag in self.tags() {
+            if let Err(e) = self.tag(tag.bytes(), add) {
+                crate::errno::ret_gather(&mut r, e);
+            }
+        }
+        if r < 0 { Err(r) } else { Ok(()) }
+    }
+
+    /// `device_has_info()`.
+    fn has_info(&self) -> bool {
+        let s = self.st();
+        !s.devlinks.is_empty()
+            || s.devlink_priority != 0
+            || !s.properties_db.v.is_empty()
+            || !s.all_tags.is_empty()
+            || !s.current_tags.is_empty()
+    }
+
+    /// `device_should_have_db()`.
+    pub fn should_have_db(&self) -> bool {
+        if self.has_info() {
+            return true;
+        }
+        let s = self.st();
+        libc::major(s.devnum) != 0 || s.ifindex != 0
+    }
+
+    /// `device_ensure_usec_initialized(device, device_old)`.
+    pub fn ensure_usec_initialized(&self, old: Option<&Device>) -> Result<(), i32> {
+        let when = match old.map(|o| o.st().usec_initialized) {
+            Some(u) if u > 0 => u,
+            _ => crate::time::now_monotonic(),
+        };
+        self.set_usec_initialized(when)
+    }
+
+    /// `device_delete_db()`.
+    pub fn delete_db(&self) -> Result<(), i32> {
+        let path = self.get_db_path()?;
+        match sys::unlinkat(crate::fd::AT_FDCWD, &path, 0) {
+            Err(r) if r != -libc::ENOENT => Err(r),
+            _ => Ok(()),
+        }
+    }
+
+    /// `device_update_db()`.
+    pub fn update_db(&self) -> Result<(), i32> {
+        if !self.should_have_db() {
+            return self.delete_db();
+        }
+        let path = self.get_db_path()?;
+        // C's cleanup unlinks the database file too when this fails.
+        let unlink_db = || {
+            let _ = sys::unlinkat(crate::fd::AT_FDCWD, &path, 0);
+        };
+        if let Err(r) = crate::fs::mkdirat_parents(crate::fd::AT_FDCWD, &path, 0o755) {
+            unlink_db();
+            return Err(log_device_debug_errno!(
+                self,
+                r,
+                "sd-device: Failed to create parent directories of '",
+                &path,
+                "': ",
+                strerror(r)
+            ));
+        }
+        let (fd, tmp) = match crate::fs::fopen_temporary(&path) {
+            Ok(x) => x,
+            Err(r) => {
+                unlink_db();
+                return Err(log_device_debug_errno!(
+                    self,
+                    r,
+                    "sd-device: Failed to create temporary file for database file '",
+                    &path,
+                    "': ",
+                    strerror(r)
+                ));
+            }
+        };
+        let fail = |r: i32, msg: Vec<u8>| -> i32 {
+            let _ = sys::unlinkat(crate::fd::AT_FDCWD, &tmp, 0);
+            unlink_db();
+            log_device_debug_errno!(self, r, msg)
+        };
+        let persist = self.st().db_persist;
+        if let Err(r) = sys::fchmod(fd.raw(), if persist { 0o1644 } else { 0o644 }) {
+            return Err(fail(
+                r,
+                crate::bcat!("sd-device: Failed to chmod temporary database file '", &tmp, "': ", strerror(r)),
+            ));
+        }
+        let mut f: Vec<u8> = Vec::new();
+        if self.has_info() {
+            let (devnum, prio, usec, props_db, current) = {
+                let s = self.st();
+                (s.devnum, s.devlink_priority, s.usec_initialized, s.properties_db.v.clone(), s.current_tags.clone())
+            };
+            if libc::major(devnum) > 0 {
+                for l in self.devlinks() {
+                    f.extend(crate::bcat!("S:", &l.bytes()[5..], "\n"));
+                }
+                if prio != 0 {
+                    f.extend(format!("L:{prio}\n").into_bytes());
+                }
+            }
+            if usec > 0 {
+                f.extend(format!("I:{usec}\n").into_bytes());
+            }
+            for (k, v) in &props_db {
+                f.extend(crate::bcat!("E:", k.bytes(), "=", v.bytes(), "\n"));
+            }
+            for t in self.tags() {
+                f.extend(crate::bcat!("G:", t.bytes(), "\n"));
+            }
+            for t in &current {
+                f.extend(crate::bcat!("Q:", t.bytes(), "\n"));
+            }
+            f.extend_from_slice(b"V:1\n");
+        }
+        if let Err(r) = sys::write_all(fd.raw(), &f) {
+            return Err(fail(
+                r,
+                crate::bcat!("sd-device: Failed to flush temporary database file '", &tmp, "': ", strerror(r)),
+            ));
+        }
+        if let Err(r) = sys::renameat(crate::fd::AT_FDCWD, &tmp, crate::fd::AT_FDCWD, &path) {
+            return Err(fail(
+                r,
+                crate::bcat!(
+                    "sd-device: Failed to rename temporary database file '",
+                    &tmp,
+                    "' to '",
+                    &path,
+                    "': ",
+                    strerror(r)
+                ),
+            ));
+        }
+        let devpath = self.get_devpath();
+        log_device_debug!(self, "sd-device: Created database file '", &path, "' for '", devpath.bytes(), "'.");
+        Ok(())
+    }
+}
+
+#[macro_export]
+macro_rules! log_device_info {
+    ($dev:expr, $($e:expr),* $(,)?) => { $crate::log_device_full_errno!($dev, $crate::log::LOG_INFO, 0, $($e),*) };
+}
+
+#[macro_export]
+macro_rules! log_device_notice {
+    ($dev:expr, $($e:expr),* $(,)?) => { $crate::log_device_full_errno!($dev, $crate::log::LOG_NOTICE, 0, $($e),*) };
+}
+
+#[macro_export]
+macro_rules! log_device_warning {
+    ($dev:expr, $($e:expr),* $(,)?) => { $crate::log_device_full_errno!($dev, $crate::log::LOG_WARNING, 0, $($e),*) };
+}
+
+#[macro_export]
+macro_rules! log_device_warning_errno {
+    ($dev:expr, $err:expr, $($e:expr),* $(,)?) => {
+        $crate::log_device_full_errno!($dev, $crate::log::LOG_WARNING, $err, $($e),*)
+    };
+}
+
+#[macro_export]
+macro_rules! log_device_error {
+    ($dev:expr, $($e:expr),* $(,)?) => { $crate::log_device_full_errno!($dev, $crate::log::LOG_ERR, 0, $($e),*) };
+}
+
+#[macro_export]
+macro_rules! log_device_error_errno {
+    ($dev:expr, $err:expr, $($e:expr),* $(,)?) => {
+        $crate::log_device_full_errno!($dev, $crate::log::LOG_ERR, $err, $($e),*)
+    };
 }

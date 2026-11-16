@@ -287,3 +287,25 @@ pub fn inode_type_can_acl(mode: u32) -> bool {
 pub fn may_be_hardlinked(st: &sys::Stat) -> bool {
     st.st_mode & libc::S_IFMT != libc::S_IFDIR && st.st_nlink > 1
 }
+
+/// `stat_verify_regular()`.
+pub fn stat_verify_regular(st: &sys::Stat) -> Result<(), i32> {
+    match st.st_mode & libc::S_IFMT {
+        libc::S_IFDIR => Err(-libc::EISDIR),
+        libc::S_IFLNK => Err(-libc::ELOOP),
+        libc::S_IFREG => Ok(()),
+        _ => Err(-libc::EBADFD),
+    }
+}
+
+/// `fd_verify_regular(fd)`.
+pub fn fd_verify_regular(fd: Fd) -> Result<(), i32> {
+    stat_verify_regular(&sys::fstat(fd)?)
+}
+
+/// `verify_regular_at(dir_fd, path, follow)`.
+pub fn verify_regular_at(dir_fd: Fd, path: &[u8], follow: bool) -> Result<(), i32> {
+    let flags =
+        if path.is_empty() { libc::AT_EMPTY_PATH } else { 0 } | if follow { 0 } else { libc::AT_SYMLINK_NOFOLLOW };
+    stat_verify_regular(&sys::fstatat(dir_fd, path, flags)?)
+}

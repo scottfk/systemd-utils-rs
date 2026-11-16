@@ -2,6 +2,7 @@
 # build-reference.sh - build upstream C systemd-utils at the pinned tag, for the differential tests
 #
 # 20261115 - Created by Claude (claude.ai, Anthropic) - scottfk
+# 20261116 - Also link test-udev-rule-runner (tools/build-rule-runner.sh) - Claude - scottfk
 #
 # Usage: tools/build-reference.sh [DIR]
 #
@@ -76,6 +77,8 @@ if [[ ! -f build/build.ninja ]]; then
 		-Dacl=enabled -Dkmod=enabled
 fi
 meson compile -C build
+# upstream's test-udev-rule-runner, for the udevadm tests
+"$here/tools/build-rule-runner.sh" "$PWD" >/dev/null
 
 # The x86 ABI, as meson-multilib builds it: a cross file for gcc -m32, the
 # native-only features off, and only the libudev targets compiled.

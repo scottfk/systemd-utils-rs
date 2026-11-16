@@ -26,7 +26,7 @@ A drop-in port/reimplementation of Gentoo's systemd-utils (udev, libudev, hwdb, 
 
 ## Status
 
-Phases 1 to 4 are done: `systemd-sysctl`, `systemd-tmpfiles`,
+Phases 1 to 5 are done: `systemd-sysctl`, `systemd-tmpfiles`,
 `systemd-hwdb` and `libudev.so.1` (both ABIs) are ported, along with the
 shared code the later phases build on (see the layout below). 330 sysctl,
 893 tmpfiles and 187 hwdb differential cases match the C build, and
@@ -37,6 +37,15 @@ device on the machine, a made-up sysfs and udev database full of edge
 cases, the monitor fed crafted netlink messages, hwdb lookups, and the
 debug log), and `lsblk`, `findmnt`, `lsusb` and `libinput` print the same
 with either library.
+
+Phase 5 ports `udevadm` and the rules engine: `udevadm info`, `test`,
+`verify`, `cat` and `hwdb`, and the event with what udevd does to it
+(database, tag index, node permissions and symlinks, `RUN`).  525
+differential cases match C, among them all of upstream's `test-udev.py`
+rule sets that don't need builtins, `verify` and `cat` on the installed
+rules, and upstream's rule runner in the destructive mode.  The builtins
+(`IMPORT{builtin}`, phase 7) and the daemon and its verbs (phase 6) are
+still to come.
 
 The reference is upstream's tag `v262` (its sources are the same as the release
 tarball's), built as Gentoo builds it ([tools/build-reference.sh](tools/build-reference.sh)):
@@ -58,6 +67,7 @@ same 12 programs, the same exported libudev symbols on both ABIs (92 functions i
 | `crates/sysctl` | `systemd-sysctl` (`src/sysctl/sysctl.c`) |
 | `crates/tmpfiles` | `systemd-tmpfiles` (`src/tmpfiles/tmpfiles.c`, `offline-passwd.c`) |
 | `crates/hwdb` | `systemd-hwdb` (`src/hwdb/hwdb.c`); the compiler and sd-hwdb are `shared::hwdb` (`hwdb-util.c`, `sd-hwdb.c`, `strbuf.c`), for udevadm and libudev later |
+| `crates/udevadm` | `udevadm` (`src/udev/udevadm*.c`): `info`, `test`, `verify`, `cat` and the deprecated `hwdb`; the verbs of later phases have their option tables (for `--help` and `--introspect-cli`) but fail "not ported yet".  The engine (`src/udev/udev-*.c`) is the library: the rules parser and the matching and assignment of every key, the `%`/`$` substitutions, `PROGRAM`/`IMPORT{program}`/`RUN` execution, the event (with the destructive steps udevd takes: the database and tag index, attribute and sysctl writes, device node permissions and the `/dev` symlink stacks), `OPTIONS="dump"`.  The builtins are a table only (phase 7).  `src/bin/test-udev-rule-runner.rs` is upstream's rule runner, for the tests. |
 | `crates/libudev` | `libudev.so.1` (`src/libudev`): the C ABI over `shared::sd_device` (`sd-device.c`, `device-private.c`, `device-util.c`), `shared::device_enumerator`, `shared::device_monitor` (with its BPF filter) and `shared::device_filter`; the netlink calls are in `shared::sys_net`, the RTM_GETLINK lookup in `shared::netlink`.  Built as a static library and linked by `tools/link-libudev.sh` with upstream's version script. |
 | `tests/common` | the differential harness, shared by every crate's tests |
 | `tests/shim` | the LD_PRELOAD clock |
@@ -70,9 +80,6 @@ isn't possible or isn't worth it:
 
 - `SYSTEMD_LOG_LOCATION=1` and the journal's `CODE_FILE=`/`CODE_LINE=`
   name the Rust source, not the C source.
-- `detect_container()` isn't ported. In a container, PID 1 and programs
-  started with `$SYSTEMD_EXEC_PID` read the kernel command line from
-  `/proc/cmdline` rather than from PID 1's argv.
 - `sd_pid_get_owner_uid()` (used for the pager's secure mode) only looks for
   a `user-UID.slice` in the process's own cgroup. Without systemd, both find
   no owner.
@@ -100,6 +107,27 @@ isn't possible or isn't worth it:
   for the unwinder of the statically linked libgcc. rustc can't link a
   library with symbol versions, so `tools/link-libudev.sh` links it from the
   static library with `cc`.
+- udevadm: C keeps the attributes and sysctls an event writes (shown by
+  `udevadm test` and `OPTIONS="dump"`) in hash maps whose order changes
+  from run to run; the port lists them in the order they were written.  For
+  the same reason, the trace lines of `SYMLINK==` and `TAG==` (one per
+  link or tag tried until one matches) come in sorted order.
+- udevadm: without systemd there is nothing to ask about a unit's
+  `SysFSPath=`, so `udevadm info dev-sda.device` takes the device from the
+  unit name, as C does when it can't connect (C would ask systemd over
+  D-Bus if it ran).  Likewise, users and groups are looked up in NSS (and
+  the intrinsic `root` and `nobody`, numeric ids, and the foreign range):
+  there are no userdb services to ask, and JSON user records in `userdb/`
+  directories are not read.
+- udevadm: callouts (`PROGRAM="ata_id ..."`) are not looked for in a build
+  directory first (C does that when it runs from its meson build tree);
+  `$ATA_ID_PATH` and friends are honored.
+- udevadm: `SECLABEL{selinux}` and `SECLABEL{smack}` are accepted and
+  logged as set, as in C built without SELinux and SMACK.
+- udevadm: interface names are always sanitized as the naming schemes with
+  `NAMING_REPLACE_STRICTLY` (all of them since v247) do; `net.naming_scheme=`
+  is ignored until `net_id` is ported (phase 7).  Renaming interfaces is
+  udevd's (phase 6): the rule runner refuses `NAME=` on an interface.
 - sd-hwdb reads `hwdb.bin` into memory where C maps it; and a lookup whose
   pattern is longer than `LINE_MAX` (2048 bytes, far beyond any real hwdb
   entry) stops matching where C's buffer arithmetic would go wrong.
@@ -158,8 +186,20 @@ then runs the test suites (so far, the differential cases of phases 1 to 4):
      in a network namespace of their own, where the probe can broadcast crafted
      uevents. Real programs (`lsblk`, `lsusb`, ...) run against each library through
      `LD_LIBRARY_PATH`, and the exported symbols and versions are compared.
-   - udev cases will run on a fake sysfs (as upstream's own udev tests do) with a
-     private `/run/udev` and `/dev`, through `udevadm test` and `udevadm info`.
+   - udevadm cases run on upstream's fake sysfs (`test/sys-script.py`, bound
+     over `/sys`) with a private `/run` and rules trees: all of upstream's
+     `test-udev.py` rule sets (except the two that need builtins) through
+     `udevadm test`, with and without `-v`, extracted by
+     `tools/udev-test-rules.py`; rules files with every check of `verify`;
+     `info` on a made-up database.  The destructive event mode udevd uses
+     runs through upstream's `test-udev-rule-runner`
+     (`tools/build-rule-runner.sh` links it in the reference build) and its
+     port, on devices without device nodes (the sandbox can't make those),
+     comparing the database, tag index, written attributes and what the
+     `RUN` programs did.  Output that varies even between two C runs is
+     normalized: hash-ordered sets (devlinks, tags, written attributes),
+     `USEC_INITIALIZED` of devices without a database entry, the CPU's APIC
+     id; and until phase 7, the builtins' init and exit logging.
    - The daemon is driven with synthetic uevents in a network namespace, and what it
      does (nodes, links, database, the uevents it rebroadcasts) is compared.
 2. **Upstream's own tests** where they can run against a different binary (the

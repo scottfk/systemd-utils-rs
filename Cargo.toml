@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/shared", "crates/sysctl", "crates/tmpfiles", "crates/hwdb", "crates/libudev"]
+members = ["crates/shared", "crates/sysctl", "crates/tmpfiles", "crates/hwdb", "crates/libudev", "crates/udevadm"]
 
 [workspace.package]
 version = "0.1.0"

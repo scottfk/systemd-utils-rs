@@ -1,10 +1,5 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 //! `proc-cmdline.c`, `initrd-util.c` and `argv-util.c`'s `invoked_by_systemd()`.
-//!
-//! Known difference: `detect_container()` is not ported, so inside a
-//! container the kernel command line is still read from /proc/cmdline
-//! rather than from PID 1's argv.  (Only PID 1 and programs started by
-//! systemd with `$SYSTEMD_EXEC_PID` read the command line at all.)
 
 use std::sync::atomic::{AtomicI8, Ordering};
 
@@ -82,8 +77,111 @@ fn proc_cmdline_strv() -> Result<Vec<Vec<u8>>, i32> {
     if let Some(e) = sys::secure_getenv("SYSTEMD_PROC_CMDLINE") {
         return strv_split_full(&e, None, flags);
     }
+    if crate::virt::detect_container().is_ok_and(|v| v != crate::virt::NONE) {
+        let raw = crate::fileio::read_full_file_with_nuls(b"/proc/1/cmdline")?;
+        let mut args: Vec<Vec<u8>> = raw.split(|&b| b == 0).map(<[u8]>::to_vec).collect();
+        if args.last().is_some_and(|a| a.is_empty()) {
+            args.pop();
+        }
+        return Ok(filter_pid1_args(&args));
+    }
     let s = crate::fileio::read_full_file(b"/proc/cmdline")?;
     strv_split_full(&s, None, flags)
+}
+
+/// `proc_cmdline_filter_pid1_args()`: drop systemd's own options from PID
+/// 1's argv.
+fn filter_pid1_args(argv: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Arg {
+        No,
+        Required,
+        Optional,
+    }
+    use Arg::*;
+    const OPTIONS: &[(&[u8], Arg)] = &[
+        (b"log-level", Required),
+        (b"log-target", Required),
+        (b"log-color", Optional),
+        (b"log-location", Optional),
+        (b"log-time", Optional),
+        (b"unit", Required),
+        (b"system", No),
+        (b"user", No),
+        (b"test", No),
+        (b"no-pager", No),
+        (b"help", No),
+        (b"version", No),
+        (b"introspect-cli", No),
+        (b"dump-configuration-items", No),
+        (b"dump-bus-properties", No),
+        (b"bus-introspect", Required),
+        (b"dump-core", Optional),
+        (b"crash-chvt", Required),
+        (b"crash-vt", Required),
+        (b"crash-shell", Optional),
+        (b"crash-reboot", Optional),
+        (b"crash-action", Required),
+        (b"confirm-spawn", Optional),
+        (b"show-status", Optional),
+        (b"deserialize", Required),
+        (b"switched-root", No),
+        (b"default-standard-output", Required),
+        (b"default-standard-error", Required),
+        (b"machine-id", Required),
+        (b"service-watchdogs", Required),
+        (b"exit-code", Required),
+        (b"timeout", Required),
+    ];
+    const SHORT: &[u8] = b"hDbsz:";
+    let mut filtered = Vec::new();
+    let mut state = No;
+    let rest = if argv.is_empty() { argv } else { &argv[1..] };
+    for (i, a) in rest.iter().enumerate() {
+        let prev = state;
+        state = No;
+        if prev == Required || (prev == Optional && a.first() != Some(&b'-')) {
+            continue;
+        }
+        if a.first() != Some(&b'-') {
+            filtered.push(a.clone());
+            continue;
+        }
+        if a.get(1) == Some(&b'-') {
+            if a.len() == 2 {
+                filtered.extend(rest[i + 1..].iter().cloned());
+                break;
+            }
+            for (name, has_arg) in OPTIONS {
+                let Some(q) = a[2..].strip_prefix(*name) else { continue };
+                if !matches!(q.first(), None | Some(b'=')) {
+                    continue;
+                }
+                if q.is_empty() && *has_arg == Required {
+                    state = Required;
+                }
+                break;
+            }
+            continue;
+        }
+        let mut k = 1;
+        while k < a.len() {
+            if let Some(p) = SHORT.iter().position(|&c| c == a[k])
+                && SHORT.get(p + 1) == Some(&b':')
+            {
+                state = if k + 1 < a.len() {
+                    No
+                } else if SHORT.get(p + 2) == Some(&b':') {
+                    Optional
+                } else {
+                    Required
+                };
+                break;
+            }
+            k += 1;
+        }
+    }
+    filtered
 }
 
 /// `mangle_word()` with `PROC_CMDLINE_STRIP_RD_PREFIX` (when `strip_rd`).
@@ -134,4 +232,35 @@ pub fn value_missing(key: &[u8], value: Option<&[u8]>) -> bool {
         return true;
     }
     false
+}
+
+/// `proc_cmdline_key_startswith(s, prefix)`: what follows the prefix
+/// ('-' and '_' compare equal).
+fn key_startswith<'a>(s: &'a [u8], prefix: &[u8]) -> Option<&'a [u8]> {
+    if s.len() < prefix.len() {
+        return None;
+    }
+    if s.iter().zip(prefix).all(|(&a, &b)| relaxed_equal_char(a, b)) { Some(&s[prefix.len()..]) } else { None }
+}
+
+/// `proc_cmdline_get_key(key, PROC_CMDLINE_VALUE_OPTIONAL, &value)`:
+/// None if the key isn't there, Some(None) if it is without a value.
+pub fn proc_cmdline_get_key(key: &[u8], value_optional: bool) -> Result<Option<Option<Vec<u8>>>, i32> {
+    if key.is_empty() {
+        return Err(-libc::EINVAL);
+    }
+    let args = proc_cmdline_strv()?;
+    let mut v: Option<Vec<u8>> = None;
+    let mut found = false;
+    for a in &args {
+        let Some(word) = mangle_word(a, false) else { continue };
+        let Some(e) = key_startswith(word, key) else { continue };
+        if e.first() == Some(&b'=') {
+            v = Some(e[1..].to_vec());
+            found = true;
+        } else if e.is_empty() && value_optional {
+            found = true;
+        }
+    }
+    Ok(if found { Some(v) } else { None })
 }

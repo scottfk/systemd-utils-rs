@@ -335,6 +335,24 @@ pub fn foreach_dirent(dir: &mut sys::Dir) -> Result<Option<(Vec<u8>, u8)>, i32> 
     }
 }
 
+/// `readdir_ensure_type()` (`FOREACH_DIRENT_ALL()`): every entry, "." and
+/// ".." included.
+pub fn foreach_dirent_all(dir: &mut sys::Dir) -> Result<Option<(Vec<u8>, u8)>, i32> {
+    loop {
+        let Some((name, mut ty)) = dir.next_entry()? else {
+            return Ok(None);
+        };
+        if ty == libc::DT_UNKNOWN {
+            match sys::fstatat(dir.fd(), &name, libc::AT_SYMLINK_NOFOLLOW) {
+                Ok(st) => ty = mode_to_dt(st.st_mode),
+                Err(e) if e == -libc::ENOENT => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        return Ok(Some((name, ty)));
+    }
+}
+
 /// `IFTODT()`.
 pub fn mode_to_dt(m: u32) -> u8 {
     ((m & libc::S_IFMT) >> 12) as u8

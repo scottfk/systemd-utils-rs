@@ -138,6 +138,13 @@ pub struct Case {
     /// Preload the clock shim (the default); off for 32-bit programs,
     /// which can't load the 64-bit shim.
     pub faketime: bool,
+    /// Rewrites stdout and stderr of both runs before they're compared
+    /// (for output that is the same by design but varies, such as
+    /// timestamps).
+    pub mask: Option<fn(&str) -> String>,
+    /// Host paths bound over real paths: (host path, real path), for
+    /// shared fixtures outside T.
+    pub host_binds: Vec<(String, String)>,
 }
 
 impl Case {
@@ -162,6 +169,8 @@ impl Case {
             shell: None,
             netns: false,
             faketime: true,
+            mask: None,
+            host_binds: Vec::new(),
         }
     }
 
@@ -275,6 +284,15 @@ impl Case {
     }
     pub fn shell(mut self, script: &str) -> Case {
         self.shell = Some(script.to_string());
+        self
+    }
+    pub fn mask(mut self, f: fn(&str) -> String) -> Case {
+        self.mask = Some(f);
+        self
+    }
+    /// Bind a host path (outside T) over `real`.
+    pub fn bind_host(mut self, host: &str, real: &str) -> Case {
+        self.host_binds.push((host.to_string(), real.to_string()));
         self
     }
     pub fn netns(mut self) -> Case {
@@ -933,6 +951,9 @@ pub fn run(case: &Case, prog: &Program, label: &str, bin: &Path) -> Outcome {
         }
         binds.push((path_c(&p), cstr(real)));
     }
+    for (host, real) in &case.host_binds {
+        binds.push((cstr(host), cstr(real)));
+    }
     let read_only: Vec<CString> = case.read_only.iter().map(|p| cstr(subst(p))).collect();
 
     std::fs::write(t.join(".stdin"), case.stdin.clone().unwrap_or_default()).unwrap();
@@ -1049,6 +1070,10 @@ pub fn run(case: &Case, prog: &Program, label: &str, bin: &Path) -> Outcome {
         (rd(".stdout"), rd(".stderr"))
     };
     let (out, err) = if case.sorted { (sort_lines(&out), sort_lines(&err)) } else { (out, err) };
+    let (out, err) = match case.mask {
+        Some(f) => (f(&out), f(&err)),
+        None => (out, err),
+    };
     let files = snapshot(&t, pid, case.meta);
     Outcome { status, stdout: out, stderr: err, syslog, journal, files }
 }

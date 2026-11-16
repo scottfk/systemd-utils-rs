@@ -3,10 +3,10 @@
 
 use crate::sys;
 
-const UID_NOBODY: u32 = 65534;
+pub const UID_NOBODY: u32 = 65534;
 
 /// `synthesize_nobody()`.
-fn synthesize_nobody() -> bool {
+pub fn synthesize_nobody() -> bool {
     use std::sync::atomic::{AtomicI8, Ordering};
     static CACHE: AtomicI8 = AtomicI8::new(-1);
     let c = CACHE.load(Ordering::Relaxed);
