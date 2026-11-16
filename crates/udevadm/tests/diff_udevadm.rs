@@ -1135,3 +1135,47 @@ fn limits() {
             .mask(mask_big_output));
     }
 }
+
+/// `test-builtin` of every builtin on every device of upstream's fake
+/// sysfs: one case per builtin, the devices in sorted order.
+#[test]
+fn builtins_fake_sysfs() {
+    for b in [
+        "blkid",
+        "btrfs",
+        "factory_reset",
+        "hwdb",
+        "input_id",
+        "keyboard",
+        "kmod",
+        "net_driver",
+        "net_id",
+        "net_setup_link",
+        "path_id",
+        "uaccess",
+        "usb_id",
+    ] {
+        let script = format!(
+            "find /sys/devices -name uevent | sed 's,/uevent$,,' | LC_ALL=C sort | while read -r d; do \
+             echo \"== $d\"; udevadm test-builtin {b} \"$d\" 2>&1; echo \"rc=$?\"; done"
+        );
+        c(f(&format!("builtin_{b}"), &[]).shell(&script));
+    }
+    // Arguments and options.
+    for (n, a) in [
+        ("builtin_hwdb_modalias", &["hwdb", "usb:v0000p0000"][..]),
+        ("builtin_hwdb_filter", &["hwdb --filter=ID_VENDOR* --lookup-prefix=x: usb:v1d6bp0002"]),
+        ("builtin_blkid_opts", &["blkid --noraid --offset=-1 --hint=session_offset=1"]),
+        ("builtin_net_setup_link_args", &["net_setup_link extra"]),
+        ("builtin_unknown", &["nosuch"]),
+        ("builtin_no_args", &[]),
+    ] {
+        let dev = "/sys/devices/pci0000:00/0000:00:1d.7/usb5/5-2/5-2:1.0";
+        let mut args: Vec<&str> = vec!["test-builtin"];
+        args.extend_from_slice(a);
+        if !a.is_empty() {
+            args.push(dev);
+        }
+        c(f(n, &args));
+    }
+}
