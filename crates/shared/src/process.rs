@@ -16,6 +16,7 @@ pub const FORK_WAIT: u32 = 1 << 8;
 pub const FORK_RLIMIT_NOFILE_SAFE: u32 = 1 << 11;
 pub const FORK_CLOSE_ALL_FDS: u32 = 1 << 1;
 pub const FORK_REARRANGE_STDIO: u32 = 1 << 5;
+pub const FORK_REOPEN_LOG: u32 = 1 << 6;
 
 fn deathsig(flags: u32) -> Option<i32> {
     if flags & FORK_DEATHSIG_SIGTERM != 0 {
@@ -102,6 +103,9 @@ pub fn safe_fork_full(name: &str, stdio: Option<[i32; 3]>, except: &[i32], flags
             sys::exit_now(libc::EXIT_FAILURE);
         }
     }
+    if flags & FORK_REOPEN_LOG != 0 {
+        crate::log::log_open();
+    }
     if flags & FORK_RLIMIT_NOFILE_SAFE != 0 {
         let r = rlimit_nofile_safe();
         if r < 0 {
@@ -159,4 +163,40 @@ pub fn rlimit_nofile_safe() -> i32 {
         );
     }
     1
+}
+
+/// `pidref_wait_for_terminate_and_check(name, pid, 0)`: the exit status.
+pub fn wait_for_terminate_and_check(name: &[u8], pid: i32) -> i32 {
+    let pidfd = match sys::pidfd_open(pid) {
+        Ok(fd) => sys::OwnedFd::new(fd),
+        Err(r) => return crate::log_debug_errno!(r, "Failed to wait for '", name, "': ", strerror(r)),
+    };
+    let ci = loop {
+        match sys::waitid_pidfd(pidfd.raw(), libc::WEXITED) {
+            Err(r) if r == -libc::EINTR => continue,
+            Err(r) => return crate::log_debug_errno!(r, "Failed to wait for '", name, "': ", strerror(r)),
+            Ok(ci) => break ci,
+        }
+    };
+    match ci.code {
+        libc::CLD_EXITED => {
+            if ci.status != 0 {
+                log_debug!("'", name, "' failed with exit status ", ci.status.to_string(), ".");
+            } else {
+                log_debug!("'", name, "' succeeded.");
+            }
+            ci.status
+        }
+        libc::CLD_KILLED | libc::CLD_DUMPED => crate::log_debug_errno!(
+            crate::errno::synthetic(libc::EPROTO),
+            "'",
+            name,
+            "' terminated by signal ",
+            crate::signal::signal_to_string(ci.status),
+            "."
+        ),
+        _ => {
+            crate::log_debug_errno!(crate::errno::synthetic(libc::EPROTO), "'", name, "' failed due to unknown reason.")
+        }
+    }
 }

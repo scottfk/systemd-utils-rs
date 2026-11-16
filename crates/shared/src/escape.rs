@@ -36,6 +36,32 @@ pub fn cescape(s: &[u8]) -> Vec<u8> {
     out
 }
 
+/// `shell_escape(s, bad)`: control characters and invalid UTF-8 C-escaped,
+/// backslashes and the bytes in `bad` escaped with a backslash.
+pub fn shell_escape(s: &[u8], bad: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        let c = s[i];
+        let l = crate::utf8::encoded_valid_unichar(&s[i..]);
+        if c < b' ' || c == 127 || l.is_none() {
+            cescape_char(c, &mut out);
+            i += 1;
+        } else if l == Some(1) {
+            if c == b'\\' || bad.contains(&c) {
+                out.push(b'\\');
+            }
+            out.push(c);
+            i += 1;
+        } else {
+            let l = l.unwrap_or(1);
+            out.extend_from_slice(&s[i..i + l]);
+            i += l;
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

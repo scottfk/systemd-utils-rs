@@ -17,6 +17,7 @@ unsafe extern "C" {
     fn secure_getenv_c(name: *const c_char) -> *mut c_char;
     fn fgetpwent(stream: *mut libc::FILE) -> *mut libc::passwd;
     fn fgetgrent(stream: *mut libc::FILE) -> *mut libc::group;
+    fn strerrorname_np(errnum: c_int) -> *const c_char;
     #[link_name = "program_invocation_short_name"]
     static PROGRAM_INVOCATION_SHORT_NAME: *const c_char;
 }
@@ -2041,4 +2042,332 @@ pub fn pread(fd: Fd, buf: &mut [u8], offset: u64) -> Result<usize, i32> {
     // SAFETY: buf is valid for writes of its length.
     let n = unsafe { libc::pread64(fd, buf.as_mut_ptr().cast(), buf.len(), offset as libc::off64_t) };
     if n < 0 { Err(neg_errno()) } else { Ok(n as usize) }
+}
+
+/// `epoll_create1(EPOLL_CLOEXEC)`.
+pub fn epoll_create() -> Result<Fd, i32> {
+    // SAFETY: a syscall without memory arguments.
+    let r = unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) };
+    if r < 0 { Err(neg_errno()) } else { Ok(r) }
+}
+
+/// `epoll_ctl(epfd, op, fd, {events, data.u64 = data})`.
+pub fn epoll_ctl(epfd: Fd, op: c_int, fd: Fd, events: u32, data: u64) -> Result<(), i32> {
+    let mut ev = libc::epoll_event { events, u64: data };
+    // SAFETY: ev is a valid epoll_event.
+    if unsafe { libc::epoll_ctl(epfd, op, fd, &mut ev) } < 0 { Err(neg_errno()) } else { Ok(()) }
+}
+
+/// `epoll_wait()` with a timeout in µs (`u64::MAX` waits forever, rounded
+/// up to ms like sd-event's fallback): the (events, data) pairs.
+pub fn epoll_wait(epfd: Fd, max: usize, timeout_usec: u64) -> Result<Vec<(u32, u64)>, i32> {
+    let mut evs: Vec<libc::epoll_event> = vec![libc::epoll_event { events: 0, u64: 0 }; max.max(1)];
+    let msec: c_int =
+        if timeout_usec == u64::MAX { -1 } else { timeout_usec.div_ceil(1000).min(c_int::MAX as u64) as c_int };
+    // SAFETY: evs is valid for max entries.
+    let r = unsafe { libc::epoll_wait(epfd, evs.as_mut_ptr(), evs.len() as c_int, msec) };
+    if r < 0 {
+        return Err(neg_errno());
+    }
+    Ok(evs[..r as usize].iter().map(|e| (e.events, e.u64)).collect())
+}
+
+/// A `sigset_t` holding `sigs`.
+fn sigset_of(sigs: &[c_int]) -> libc::sigset_t {
+    // SAFETY: sigset_t is plain old data, initialized by sigemptyset().
+    let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
+    // SAFETY: valid set pointer.
+    unsafe { libc::sigemptyset(&mut set) };
+    for &s in sigs {
+        // SAFETY: as above.
+        unsafe { libc::sigaddset(&mut set, s) };
+    }
+    set
+}
+
+/// `signalfd(fd, {sigs}, SFD_NONBLOCK|SFD_CLOEXEC)`: `fd` -1 makes a new one.
+pub fn signalfd(fd: Fd, sigs: &[c_int]) -> Result<Fd, i32> {
+    let set = sigset_of(sigs);
+    // SAFETY: valid set pointer.
+    let r = unsafe { libc::signalfd(fd, &set, libc::SFD_NONBLOCK | libc::SFD_CLOEXEC) };
+    if r < 0 { Err(neg_errno()) } else { Ok(r) }
+}
+
+/// The fields of a `struct signalfd_siginfo` that callers look at.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SignalInfo {
+    pub signo: u32,
+    pub code: i32,
+    pub pid: u32,
+    pub uid: u32,
+    pub int: i32,
+}
+
+/// One `read()` of a signalfd: None on EAGAIN.
+pub fn read_signalfd(fd: Fd) -> Result<Option<SignalInfo>, i32> {
+    // SAFETY: signalfd_siginfo is plain old data.
+    let mut si: libc::signalfd_siginfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::signalfd_siginfo>();
+    // SAFETY: si is valid for writes of its size.
+    let n = unsafe { libc::read(fd, (&mut si as *mut libc::signalfd_siginfo).cast(), size) };
+    if n < 0 {
+        let e = errno();
+        if e == libc::EAGAIN || e == libc::EINTR {
+            return Ok(None);
+        }
+        return Err(-e);
+    }
+    if n as usize != size {
+        return Err(-libc::EIO);
+    }
+    Ok(Some(SignalInfo { signo: si.ssi_signo, code: si.ssi_code, pid: si.ssi_pid, uid: si.ssi_uid, int: si.ssi_int }))
+}
+
+/// `sigprocmask(SIG_UNBLOCK, {sigs})`.
+pub fn unblock_signals(sigs: &[c_int]) -> Result<(), i32> {
+    let set = sigset_of(sigs);
+    // SAFETY: valid set pointer; the old mask isn't wanted.
+    if unsafe { libc::sigprocmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut()) } < 0 {
+        return Err(neg_errno());
+    }
+    Ok(())
+}
+
+/// The fields of a `siginfo_t` from `waitid()`: (pid, code, status).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ChildInfo {
+    pub pid: i32,
+    pub code: i32,
+    pub status: i32,
+}
+
+/// `waitid(P_PIDFD, pidfd, &si, options)`.
+#[allow(clippy::unnecessary_cast)]
+pub fn waitid_pidfd(pidfd: Fd, options: c_int) -> Result<ChildInfo, i32> {
+    // SAFETY: siginfo_t is plain old data.
+    let mut si: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    // SAFETY: si is a valid out-pointer.
+    let r = unsafe { libc::waitid(libc::P_PIDFD, pidfd as libc::id_t, &mut si, options) };
+    if r < 0 {
+        return Err(neg_errno());
+    }
+    // SAFETY: reading the union fields waitid() filled in.
+    let (pid, status) = unsafe { (si.si_pid(), si.si_status()) };
+    Ok(ChildInfo { pid, code: si.si_code, status })
+}
+
+/// `pidfd_send_signal(pidfd, sig, NULL, 0)`.
+pub fn pidfd_send_signal(pidfd: Fd, sig: c_int) -> Result<(), i32> {
+    // SAFETY: a syscall without memory arguments (NULL info).
+    let r = unsafe { libc::syscall(libc::SYS_pidfd_send_signal, pidfd, sig, std::ptr::null::<c_void>(), 0) };
+    if r < 0 { Err(neg_errno()) } else { Ok(()) }
+}
+
+/// `sigqueue(pid, sig, {.sival_int = value})`, as `pidref_sigqueue()`.
+pub fn sigqueue(pid: i32, sig: c_int, value: c_int) -> Result<(), i32> {
+    // sival_int overlays the low bytes of sival_ptr (little endian).
+    let v = libc::sigval { sival_ptr: value as u32 as usize as *mut c_void };
+    // SAFETY: a call without memory arguments.
+    if unsafe { libc::sigqueue(pid, sig, v) } < 0 { Err(neg_errno()) } else { Ok(()) }
+}
+
+/// `inotify_rm_watch(fd, wd)`.
+pub fn inotify_rm_watch(fd: Fd, wd: c_int) -> Result<(), i32> {
+    // SAFETY: a syscall without memory arguments.
+    if unsafe { libc::inotify_rm_watch(fd, wd) } < 0 { Err(neg_errno()) } else { Ok(()) }
+}
+
+/// `accept4(fd, NULL, NULL, SOCK_NONBLOCK|SOCK_CLOEXEC)`.
+pub fn accept4(fd: Fd) -> Result<Fd, i32> {
+    // SAFETY: NULL address arguments are allowed.
+    let r = unsafe {
+        libc::accept4(fd, std::ptr::null_mut(), std::ptr::null_mut(), libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC)
+    };
+    if r < 0 { Err(neg_errno()) } else { Ok(r) }
+}
+
+/// `getsockopt(fd, SOL_SOCKET, SO_PEERCRED)`: (pid, uid, gid).
+pub fn peer_cred(fd: Fd) -> Result<(i32, u32, u32), i32> {
+    let mut c = libc::ucred { pid: 0, uid: 0, gid: 0 };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: c and len are valid out-pointers of matching size.
+    let r = unsafe {
+        libc::getsockopt(fd, libc::SOL_SOCKET, libc::SO_PEERCRED, (&mut c as *mut libc::ucred).cast(), &mut len)
+    };
+    if r < 0 { Err(neg_errno()) } else { Ok((c.pid, c.uid, c.gid)) }
+}
+
+/// `bind()` of an AF_UNIX socket to `path` (a leading '@' is abstract),
+/// then `listen(fd, backlog)`.
+pub fn bind_listen_unix(fd: Fd, path: &[u8], backlog: c_int) -> Result<(), i32> {
+    let (sa, len) = sockaddr_un(path)?;
+    // SAFETY: sa is a valid sockaddr_un of length len.
+    if unsafe { libc::bind(fd, (&sa as *const libc::sockaddr_un).cast(), len) } < 0 {
+        return Err(neg_errno());
+    }
+    // SAFETY: a syscall without memory arguments.
+    if unsafe { libc::listen(fd, backlog) } < 0 {
+        return Err(neg_errno());
+    }
+    Ok(())
+}
+
+/// `recv(fd, buf, flags)`.
+pub fn recv(fd: Fd, buf: &mut [u8], flags: c_int) -> Result<usize, i32> {
+    // SAFETY: buf is valid for writes of its length.
+    let n = unsafe { libc::recv(fd, buf.as_mut_ptr().cast(), buf.len(), flags) };
+    if n < 0 { Err(neg_errno()) } else { Ok(n as usize) }
+}
+
+/// `send(fd, buf, MSG_DONTWAIT|MSG_NOSIGNAL)`.
+pub fn send_nosignal(fd: Fd, buf: &[u8]) -> Result<usize, i32> {
+    // SAFETY: buf is valid for reads of its length.
+    let n = unsafe { libc::send(fd, buf.as_ptr().cast(), buf.len(), libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL) };
+    if n < 0 { Err(neg_errno()) } else { Ok(n as usize) }
+}
+
+/// `fcntl(fd, F_SETFL, flags | O_NONBLOCK)`.
+pub fn set_nonblock(fd: Fd, on: bool) -> Result<(), i32> {
+    // SAFETY: fcntl() without memory arguments.
+    let fl = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if fl < 0 {
+        return Err(neg_errno());
+    }
+    let nf = if on { fl | libc::O_NONBLOCK } else { fl & !libc::O_NONBLOCK };
+    // SAFETY: as above.
+    if nf != fl && unsafe { libc::fcntl(fd, libc::F_SETFL, nf) } < 0 {
+        return Err(neg_errno());
+    }
+    Ok(())
+}
+
+/// `strerrorname_np(e)`: the errno's symbolic name, as
+/// `errno_name_no_fallback()` (which uses the same table).
+pub fn errno_name(e: i32) -> Option<Vec<u8>> {
+    // SAFETY: returns NULL or a static string.
+    let p = unsafe { strerrorname_np(e) };
+    if p.is_null() {
+        return None;
+    }
+    // SAFETY: p is a static NUL-terminated string.
+    Some(unsafe { CStr::from_ptr(p) }.to_bytes().to_vec())
+}
+
+/// `bind()` of an AF_UNIX socket to `path` (a leading '@' is abstract).
+pub fn bind_unix(fd: Fd, path: &[u8]) -> Result<(), i32> {
+    let (sa, len) = sockaddr_un(path)?;
+    // SAFETY: sa is a valid sockaddr_un of length len.
+    if unsafe { libc::bind(fd, (&sa as *const libc::sockaddr_un).cast(), len) } < 0 {
+        return Err(neg_errno());
+    }
+    Ok(())
+}
+
+/// `recvmsg(fd, MSG_DONTWAIT|MSG_CMSG_CLOEXEC)` of one datagram of at most
+/// `max` bytes: the data and the SCM_CREDENTIALS pid.  Passed fds are
+/// closed; truncation fails with -EXFULL (data) or -ECHRNG (control).
+pub fn recv_with_creds(fd: Fd, max: usize) -> Result<(Vec<u8>, Option<i32>), i32> {
+    let mut buf = vec![0u8; max];
+    let mut iov = libc::iovec { iov_base: buf.as_mut_ptr().cast(), iov_len: buf.len() };
+    // u64 for alignment; room for credentials and a few fds.
+    let mut control = [0u64; 64];
+    // SAFETY: msghdr is plain old data.
+    let mut mh: libc::msghdr = unsafe { std::mem::zeroed() };
+    mh.msg_iov = &mut iov;
+    mh.msg_iovlen = 1;
+    mh.msg_control = control.as_mut_ptr().cast();
+    mh.msg_controllen = std::mem::size_of_val(&control) as _;
+    // SAFETY: mh points at valid buffers for the call.
+    let n = unsafe { libc::recvmsg(fd, &mut mh, libc::MSG_DONTWAIT | libc::MSG_CMSG_CLOEXEC) };
+    if n < 0 {
+        return Err(neg_errno());
+    }
+    let mut pid = None;
+    // SAFETY: walking the control messages recvmsg() filled in.
+    unsafe {
+        let mut c = libc::CMSG_FIRSTHDR(&mh);
+        while !c.is_null() {
+            if (*c).cmsg_level == libc::SOL_SOCKET {
+                if (*c).cmsg_type == libc::SCM_CREDENTIALS {
+                    let u = libc::CMSG_DATA(c).cast::<libc::ucred>().read_unaligned();
+                    pid = Some(u.pid);
+                } else if (*c).cmsg_type == libc::SCM_RIGHTS {
+                    let n = ((*c).cmsg_len as usize - libc::CMSG_LEN(0) as usize) / std::mem::size_of::<c_int>();
+                    for i in 0..n {
+                        libc::close(libc::CMSG_DATA(c).cast::<c_int>().add(i).read_unaligned());
+                    }
+                }
+            }
+            c = libc::CMSG_NXTHDR(&mh, c);
+        }
+    }
+    if mh.msg_flags & libc::MSG_CTRUNC != 0 {
+        return Err(-libc::ECHRNG);
+    }
+    if mh.msg_flags & libc::MSG_TRUNC != 0 {
+        return Err(-libc::EXFULL);
+    }
+    buf.truncate(n as usize);
+    Ok((buf, pid))
+}
+
+/// `malloc_trim(0)`, with `mallinfo2()`'s hblkhd+arena before and after.
+pub fn malloc_trim_info() -> (bool, usize) {
+    // SAFETY: plain glibc calls without pointer arguments.
+    let before = unsafe { libc::mallinfo2() };
+    // SAFETY: as above.
+    let r = unsafe { libc::malloc_trim(0) };
+    // SAFETY: as above.
+    let after = unsafe { libc::mallinfo2() };
+    (r > 0, before.hblkhd.saturating_sub(after.hblkhd) + before.arena.saturating_sub(after.arena))
+}
+
+/// `cpus_in_affinity_mask()`.
+pub fn cpus_in_affinity_mask() -> Result<u32, i32> {
+    let mut n: usize = 16;
+    loop {
+        let words = n.div_ceil(64);
+        let mut set = vec![0u64; words];
+        // SAFETY: set is valid for words*8 bytes, the size passed.
+        let r = unsafe { libc::sched_getaffinity(0, words * 8, set.as_mut_ptr().cast()) };
+        if r >= 0 {
+            let k: u32 = set.iter().map(|w| w.count_ones()).sum();
+            return if k == 0 { Err(-libc::EINVAL) } else { Ok(k) };
+        }
+        let e = errno();
+        if e != libc::EINVAL {
+            return Err(-e);
+        }
+        if n > usize::MAX / 2 {
+            return Err(-libc::ENOMEM);
+        }
+        n *= 2;
+    }
+}
+
+/// `sysconf(_SC_PHYS_PAGES)`.
+pub fn phys_pages() -> u64 {
+    // SAFETY: sysconf() has no memory arguments.
+    let r = unsafe { libc::sysconf(libc::_SC_PHYS_PAGES) };
+    r.max(0) as u64
+}
+
+/// `memfd_new_full(name, MFD_ALLOW_SEALING)`.
+pub fn memfd_create(name: &[u8]) -> Result<Fd, i32> {
+    let c = to_cstring(name);
+    // SAFETY: c is NUL-terminated.
+    let r = unsafe { libc::memfd_create(c.as_ptr(), libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING) };
+    if r < 0 { Err(neg_errno()) } else { Ok(r) }
+}
+
+/// `terminal_detach_session()`: `setsid()`, then drop the controlling
+/// terminal if there still is one.
+pub fn setsid_detach() {
+    // SAFETY: setsid() has no arguments.
+    unsafe { libc::setsid() };
+    if let Ok(fd) = open(b"/dev/tty", libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC | libc::O_NONBLOCK, 0) {
+        // SAFETY: TIOCNOTTY takes no argument.
+        unsafe { libc::ioctl(fd, libc::TIOCNOTTY) };
+        close(fd);
+    }
 }

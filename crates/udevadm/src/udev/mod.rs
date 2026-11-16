@@ -10,4 +10,5 @@ pub mod node;
 pub mod rules;
 pub mod spawn;
 pub mod util;
+pub mod varlink;
 pub mod wait;

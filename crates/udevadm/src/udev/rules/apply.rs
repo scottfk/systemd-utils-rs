@@ -1601,3 +1601,32 @@ fn log_event_syntax_not_system(ctx: Ctx, event: &Event, token: &Token, group: bo
         &[MESSAGE_SYSTEM_ACCOUNT_REQUIRED.as_bytes().to_vec(), bcat!("DEVICE=", sysname)],
     );
 }
+
+impl Rules {
+    /// `udev_rules_apply_static_dev_perms(rules)`.
+    pub fn apply_static_dev_perms(&self) -> Result<(), i32> {
+        for file in &self.files {
+            for line in &file.lines {
+                if line.ty & LINE_HAS_STATIC_NODE == 0 {
+                    continue;
+                }
+                let (mut uid, mut gid, mut mode) =
+                    (crate::udev::def::UID_INVALID, crate::udev::def::GID_INVALID, crate::udev::def::MODE_INVALID);
+                let mut tags: Vec<Vec<u8>> = Vec::new();
+                for t in &line.tokens {
+                    match (t.ty, &t.data) {
+                        (tk::A_OWNER_ID, Data::Id(u)) => uid = *u,
+                        (tk::A_GROUP_ID, Data::Id(g)) => gid = *g,
+                        (tk::A_MODE_ID, Data::Mode(m)) => mode = *m,
+                        (tk::A_TAG, _) => tags.push(t.value_str().to_vec()),
+                        (tk::A_OPTIONS_STATIC_NODE, _) => {
+                            super::super::node::static_node_apply_permissions(t.value_str(), mode, uid, gid, &tags)?;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}

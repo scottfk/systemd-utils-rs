@@ -673,3 +673,80 @@ pub fn udev_node_apply_permissions(
     };
     apply_permissions_impl(Some(dev), fd.raw(), devnode.bytes(), apply_mac, mode, uid, gid, seclabel_list)
 }
+
+/// `xescape(s, bad)`: `\xNN` for control characters, bytes >= 127,
+/// backslashes and the bytes in `bad`.
+fn xescape(s: &[u8], bad: &[u8]) -> Vec<u8> {
+    let hex = b"0123456789abcdef";
+    let mut out = Vec::with_capacity(s.len());
+    for &c in s {
+        if !(b' '..127).contains(&c) || c == b'\\' || bad.contains(&c) {
+            out.extend_from_slice(&[b'\\', b'x', hex[(c >> 4) as usize], hex[(c & 15) as usize]]);
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// `static_node_apply_permissions(name, mode, uid, gid, tags)`.
+pub fn static_node_apply_permissions(name: &[u8], mode: u32, uid: u32, gid: u32, tags: &[Vec<u8>]) -> Result<(), i32> {
+    if uid == UID_INVALID && gid == GID_INVALID && mode == MODE_INVALID && tags.is_empty() {
+        return Ok(());
+    }
+    let devnode = bcat!("/dev/", name);
+    let fd = match sys::open(&devnode, libc::O_PATH | libc::O_CLOEXEC, 0) {
+        Ok(fd) => OwnedFd::new(fd),
+        Err(r) => {
+            let ignore = absent_or_empty(r);
+            shared::log_full_errno!(
+                if ignore { shared::log::LOG_DEBUG } else { shared::log::LOG_WARNING },
+                r,
+                "Failed to open device node '",
+                &devnode[..],
+                "'",
+                if ignore { ", ignoring" } else { "" },
+                ": ",
+                strerror(r)
+            );
+            return if ignore { Ok(()) } else { Err(r) };
+        }
+    };
+    let st = match sys::fstat(fd.raw()) {
+        Ok(st) => st,
+        Err(r) => return Err(shared::log_error_errno!(r, "Failed to stat ", &devnode[..], ": ", strerror(r))),
+    };
+    let fmt = st.st_mode & libc::S_IFMT;
+    if fmt != libc::S_IFBLK && fmt != libc::S_IFCHR {
+        shared::log_warning!(&devnode[..], " is neither block nor character device, ignoring.");
+        return Ok(());
+    }
+    let unescaped = xescape(name, b"/.");
+    for t in tags {
+        let p = path_join(&[b"/run/udev/static_node-tags/", t, &unescaped]);
+        if let Err(r) = shared::fs::mkdirat_parents(AT_FDCWD, &p, 0o755) {
+            return Err(shared::log_error_errno!(
+                r,
+                "Failed to create parent directory for ",
+                &p[..],
+                ": ",
+                strerror(r)
+            ));
+        }
+        match sys::symlinkat(&devnode, AT_FDCWD, &p) {
+            Err(r) if r != -libc::EEXIST => {
+                return Err(shared::log_error_errno!(
+                    r,
+                    "Failed to create symlink ",
+                    &p[..],
+                    " -> ",
+                    &devnode[..],
+                    ": ",
+                    strerror(r)
+                ));
+            }
+            _ => {}
+        }
+    }
+    apply_permissions_impl(None, fd.raw(), &devnode, false, mode, uid, gid, &[])
+}

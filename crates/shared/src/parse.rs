@@ -178,3 +178,12 @@ pub fn split_pair<'a>(s: &'a [u8], sep: &[u8]) -> Result<(&'a [u8], &'a [u8]), i
     let i = s.windows(sep.len()).position(|w| w == sep).ok_or(-libc::EINVAL)?;
     Ok((&s[..i], &s[i + sep.len()..]))
 }
+
+/// `parse_boolean_argument(optname, s, &ret)`: None stands for true.
+pub fn parse_boolean_argument(optname: &str, s: Option<&[u8]>) -> Result<bool, i32> {
+    match s {
+        None => Ok(true),
+        Some(s) => parse_boolean(s)
+            .map_err(|r| crate::log_error_errno!(r, "Failed to parse boolean argument to '", optname, "': ", s)),
+    }
+}

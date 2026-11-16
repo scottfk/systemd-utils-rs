@@ -259,3 +259,17 @@ pub fn unix_connect_probe(path: &[u8]) -> Result<(), i32> {
     }
     Ok(())
 }
+
+/// `sd_is_socket(fd, AF_NETLINK, SOCK_RAW, -1)`.
+pub fn is_netlink_raw_socket(fd: Fd) -> Result<bool, i32> {
+    let st = crate::sys::fstat(fd)?;
+    if st.st_mode & libc::S_IFMT != libc::S_IFSOCK {
+        return Ok(false);
+    }
+    let ty = crate::sys::getsockopt_int(fd, libc::SOL_SOCKET, libc::SO_TYPE)?;
+    if ty != libc::SOCK_RAW {
+        return Ok(false);
+    }
+    let dom = crate::sys::getsockopt_int(fd, libc::SOL_SOCKET, libc::SO_DOMAIN)?;
+    Ok(dom == libc::AF_NETLINK)
+}

@@ -145,3 +145,8 @@ pub fn device_get_property_value_with_fallback(
 pub fn bytes(d: &DStr) -> Vec<u8> {
     d.bytes().to_vec()
 }
+
+/// `udev_property_assignment_is_valid()`.
+pub fn udev_property_assignment_is_valid(s: &[u8]) -> bool {
+    shared::env::env_assignment_is_valid(s)
+}

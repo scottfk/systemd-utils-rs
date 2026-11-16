@@ -375,3 +375,46 @@ impl Rules {
         self.files[index].issues.get()
     }
 }
+
+/// `config_get_stats_by_path(".rules", NULL, 0, RULES_DIRS, false, &stats)`.
+fn rules_stats_by_path() -> Result<Vec<(Vec<u8>, shared::sys::Stat)>, i32> {
+    let files = shared::conf_files::conf_files_list_strv(Some(b".rules"), None, 0, &conf_paths("udev/rules.d"))?;
+    let mut out = Vec::new();
+    for f in files {
+        let st = match shared::sys::stat(&f) {
+            Err(r) if r == -libc::ENOENT => continue,
+            Err(r) => return Err(r),
+            Ok(st) => st,
+        };
+        // Empty files and /dev/null symlinks count as masked, as when loading.
+        if shared::stat_util::null_or_empty(&st) {
+            continue;
+        }
+        out.push((f, st));
+    }
+    Ok(out)
+}
+
+/// `udev_rules_should_reload(rules)`.
+pub fn udev_rules_should_reload(rules: Option<&Rules>) -> bool {
+    let Some(rules) = rules else { return true };
+    let stats = match rules_stats_by_path() {
+        Ok(s) => s,
+        Err(r) => {
+            shared::log_warning_errno!(r, "Failed to get stats of udev rules, ignoring: ", strerror(r));
+            return true;
+        }
+    };
+    let equal = stats.len() == rules.stats_by_path.len()
+        && rules.stats_by_path.iter().all(|(p, a)| {
+            stats
+                .iter()
+                .find(|(q, _)| shared::path::path_equal(p, q))
+                .is_some_and(|(_, b)| shared::stat_util::stat_inode_unmodified(a, b))
+        });
+    if !equal {
+        log_debug!("Udev rules need reloading");
+        return true;
+    }
+    false
+}

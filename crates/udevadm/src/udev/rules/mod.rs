@@ -5,7 +5,7 @@
 mod apply;
 mod load;
 
-pub use load::udev_rules_load;
+pub use load::{udev_rules_load, udev_rules_should_reload};
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -114,7 +114,7 @@ pub(super) mod tk {
 // `UdevRuleLineType`.
 const LINE_HAS_NAME: u32 = 1 << 0;
 const LINE_HAS_DEVLINK: u32 = 1 << 1;
-const LINE_HAS_STATIC_NODE: u32 = 1 << 2;
+pub(super) const LINE_HAS_STATIC_NODE: u32 = 1 << 2;
 const LINE_HAS_GOTO: u32 = 1 << 3;
 const LINE_HAS_LABEL: u32 = 1 << 4;
 const LINE_UPDATE_SOMETHING: u32 = 1 << 5;
