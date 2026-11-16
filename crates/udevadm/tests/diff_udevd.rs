@@ -59,6 +59,8 @@ start() {
     while [ ! -S /run/udev/io.systemd.Udev ] && [ $i -lt 100 ]; do sleep 0.05; i=$((i+1)); done
 }
 stop() {
+    # Workers that exited must have been reaped.
+    echo "zombies=$(ps --ppid "$(cat /run/d.pid)" -o stat= | grep -c '^Z')"
     "$U" control --exit; echo "exit=$?"
     pid=$(cat /run/d.pid)
     wait "$pid"; echo "udevd=$?"
