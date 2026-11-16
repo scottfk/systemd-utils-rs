@@ -72,6 +72,11 @@ fn single_index(t: LogTarget) -> Option<usize> {
 
 const LOG_LEVEL_TABLE: [&str; 8] = ["emerg", "alert", "crit", "err", "warning", "notice", "info", "debug"];
 
+/// `log_level_to_string()`.
+pub fn log_level_to_string(level: i32) -> Option<&'static str> {
+    LOG_LEVEL_TABLE.get(level as usize).copied()
+}
+
 /// `log_level_from_string()` (names, or numbers up to LOG_DEBUG).
 pub fn log_level_from_string(s: &[u8]) -> Result<i32, i32> {
     if let Some(i) = LOG_LEVEL_TABLE.iter().position(|n| n.as_bytes() == s) {
@@ -1064,7 +1069,20 @@ pub fn log_assert_failed_return(text: &str, file: &'static str, line: u32, func:
 /// `log_struct_internal()` for the common case: extra journal fields plus a
 /// `MESSAGE=`.  Without a journal, the message (cut to fit `LINE_MAX`
 /// together with its "MESSAGE=" prefix) goes through `log_dispatch()`.
-pub fn log_struct(mut level: i32, error: i32, loc: Loc, fields: &[Vec<u8>], message: &[u8]) -> i32 {
+pub fn log_struct(level: i32, error: i32, loc: Loc, fields: &[Vec<u8>], message: &[u8]) -> i32 {
+    log_struct_full(level, error, loc, fields, message, &[])
+}
+
+/// `log_struct_internal()` with the fields in the order given: `before`,
+/// then `MESSAGE=`, then `after`.
+pub fn log_struct_full(
+    mut level: i32,
+    error: i32,
+    loc: Loc,
+    fields: &[Vec<u8>],
+    message: &[u8],
+    after: &[Vec<u8>],
+) -> i32 {
     use LogTarget::*;
     let ret = -errno_value(error);
     if log_pri(level) > log_get_max_level() || log_get_target() == Null {
@@ -1091,6 +1109,10 @@ pub fn log_struct(mut level: i32, error: i32, loc: Loc, fields: &[Vec<u8>], mess
         }
         parts.push(bcat!("MESSAGE=", message));
         parts.push(b"\n".to_vec());
+        for f in after {
+            parts.push(f.clone());
+            parts.push(b"\n".to_vec());
+        }
         let refs: Vec<&[u8]> = parts.iter().map(|p| &p[..]).collect();
         let _ = sys::sendmsg_iov(s.journal_fd, &refs);
         if s.open_when_needed {

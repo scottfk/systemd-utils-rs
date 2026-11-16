@@ -171,3 +171,14 @@ pub fn rtnl_get_ifname(ifindex: i32) -> Result<Vec<u8>, i32> {
     }
     Ok(name)
 }
+
+/// `ifname_valid_char()`.
+pub fn ifname_valid_char(a: u8) -> bool {
+    if a >= 127 {
+        return false;
+    }
+    if a <= 32 {
+        return false;
+    }
+    !matches!(a, b':' | b'/' | b'%')
+}

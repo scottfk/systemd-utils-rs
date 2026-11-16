@@ -21,6 +21,36 @@ pub const SD_JSON_FORMAT_PRETTY: u32 = 1 << 2;
 pub const SD_JSON_FORMAT_PRETTY_AUTO: u32 = 1 << 3;
 pub const SD_JSON_FORMAT_COLOR: u32 = 1 << 4;
 pub const SD_JSON_FORMAT_COLOR_AUTO: u32 = 1 << 5;
+pub const SD_JSON_FORMAT_SSE: u32 = 1 << 7;
+pub const SD_JSON_FORMAT_SEQ: u32 = 1 << 8;
+
+/// `sd_json_format_enabled(flags)`.
+pub fn format_enabled(flags: u32) -> bool {
+    flags & SD_JSON_FORMAT_OFF == 0
+}
+
+/// `sd_json_variant_new_string()`: strings must be valid UTF-8.
+pub fn string_checked(s: &[u8]) -> Result<Json, i32> {
+    if crate::utf8::is_valid(s) { Ok(Json::String(s.to_vec())) } else { Err(-libc::EUCLEAN) }
+}
+
+/// `parse_json_argument(s, &ret)`: Ok(None) after "help".
+pub fn parse_json_argument(s: &[u8]) -> Result<Option<u32>, i32> {
+    match s {
+        b"pretty" => Ok(Some(SD_JSON_FORMAT_PRETTY | SD_JSON_FORMAT_COLOR_AUTO)),
+        b"short" => Ok(Some(SD_JSON_FORMAT_NEWLINE)),
+        b"off" => Ok(Some(SD_JSON_FORMAT_OFF)),
+        b"help" => {
+            crate::printo!("pretty\nshort\noff\n");
+            Ok(None)
+        }
+        _ => Err(crate::log_error_errno!(
+            crate::errno::synthetic(libc::EINVAL),
+            "Unknown argument to --json= switch: ",
+            s
+        )),
+    }
+}
 
 impl Json {
     pub fn str(s: impl AsRef<[u8]>) -> Json {
@@ -135,9 +165,25 @@ pub fn dump(v: &Json, mut flags: u32) -> Vec<u8> {
         flags |= if on_tty() { SD_JSON_FORMAT_PRETTY } else { SD_JSON_FORMAT_NEWLINE };
     }
     let mut out = Vec::new();
+    if flags & SD_JSON_FORMAT_SSE != 0 {
+        out.extend_from_slice(b"data: ");
+    }
+    if flags & SD_JSON_FORMAT_SEQ != 0 {
+        out.push(0x1e);
+    }
     format(&mut out, v, flags, b"");
-    if flags & (SD_JSON_FORMAT_PRETTY | SD_JSON_FORMAT_NEWLINE) != 0 {
+    if flags & (SD_JSON_FORMAT_PRETTY | SD_JSON_FORMAT_SEQ | SD_JSON_FORMAT_SSE | SD_JSON_FORMAT_NEWLINE) != 0 {
+        out.push(b'\n');
+    }
+    if flags & SD_JSON_FORMAT_SSE != 0 {
         out.push(b'\n');
     }
     out
+}
+
+/// `sd_json_variant_set_field(&v, field, value)`: an existing field is
+/// dropped and the new one goes last.
+pub fn set_field(obj: &mut Vec<(Vec<u8>, Json)>, field: &[u8], value: Json) {
+    obj.retain(|(k, _)| k != field);
+    obj.push((field.to_vec(), value));
 }

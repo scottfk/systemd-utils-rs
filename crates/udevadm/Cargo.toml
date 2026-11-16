@@ -1,0 +1,28 @@
+[package]
+name = "udevadm"
+description = "Port of udevadm and the udev rules engine (src/udev)"
+license = "GPL-2.0-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lib]
+name = "udevadm"
+path = "src/lib.rs"
+
+[[bin]]
+name = "udevadm"
+path = "src/main.rs"
+
+# Upstream's src/udev/test-udev-rule-runner.c, for the tests only.
+[[bin]]
+name = "test-udev-rule-runner"
+path = "src/bin/test-udev-rule-runner.rs"
+
+[dependencies]
+libc.workspace = true
+shared = { path = "../shared" }
+
+[lints]
+workspace = true

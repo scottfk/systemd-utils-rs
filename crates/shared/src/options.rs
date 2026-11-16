@@ -468,6 +468,10 @@ pub struct Verb {
     pub flags: u32,
     pub argspec: &'static [&'static str],
     pub help: Option<&'static str>,
+    /// The footer of the verb's own help.
+    pub footer: Option<&'static str>,
+    /// The verb's own options (its option namespace), if any.
+    pub options: Option<&'static [Opt]>,
 }
 
 impl Verb {
@@ -480,7 +484,13 @@ impl Verb {
         flags: u32,
         help: Option<&'static str>,
     ) -> Verb {
-        Verb { verb, min_args, max_args, flags, argspec, help }
+        Verb { verb, min_args, max_args, flags, argspec, help, footer: None, options: None }
+    }
+    /// `VERB_SCOPE_NS_FULL(..., ns, ..., ft)`: the verb's own options and footer.
+    pub const fn with_options(mut self, options: &'static [Opt], footer: Option<&'static str>) -> Verb {
+        self.options = Some(options);
+        self.footer = footer;
+        self
     }
     /// `VERB_NOARG(d, v, h)`.
     pub const fn noarg(verb: &'static str, help: &'static str) -> Verb {
@@ -801,6 +811,59 @@ pub fn command_print_help(cmd: &Command, options: &[Opt], pager_flags: Option<u3
     0
 }
 
+/// `_command_print_verb_help(..., name)`: the help of one verb of `cmd`.
+pub fn command_print_verb_help(cmd: &Command, name: &str, pager_flags: Option<u32>) -> i32 {
+    let verb = cmd.verbs.iter().find(|v| !v.is_group() && v.verb == name).expect("verb exists");
+    if let Some(f) = pager_flags {
+        crate::pager::pager_open(f);
+    }
+    let optionspec = if verb.flags & VERB_OPTION_REQUIRED != 0 {
+        " OPTION\u{2026}"
+    } else if verb.options.is_some() {
+        " [OPTION\u{2026}]"
+    } else {
+        ""
+    };
+    let specs: &[&str] = if verb.argspec.is_empty() { &[" "] } else { verb.argspec };
+    for spec in specs {
+        let some = *spec != " ";
+        help_cmdline(&bcat!(
+            "[OPTION\u{2026}] ",
+            verb.verb,
+            optionspec,
+            if some { " " } else { "" },
+            if some { *spec } else { "" }
+        ));
+    }
+    if let Some(h) = verb.help {
+        let seq = format!("{}{}", ansi::highlight(), ansi::add_italics());
+        let t = format!("{h}.");
+        let r = print_wrapped(Some(&t), Some(&seq));
+        if r < 0 {
+            return r;
+        }
+    }
+    if let Some(options) = verb.options {
+        let (mut t, _, _) = help_table_group(options);
+        help_section("Options");
+        out(&t.format());
+        let r = crate::stdio::fflush_and_check_stdout();
+        if r < 0 {
+            return log_error_errno!(r, "Failed to print table: ", crate::errno::strerror(r));
+        }
+    }
+    let red = if verb.flags & VERB_DEPRECATED != 0 { Some(ansi::highlight_red()) } else { None };
+    let r = print_wrapped(verb.footer, red);
+    if r < 0 {
+        return r;
+    }
+    for page in cmd.man_pages {
+        let link = crate::pretty_print::terminal_urlify_man(page.as_bytes(), None);
+        printo!("\nSee the ", link, " for details.\n");
+    }
+    0
+}
+
 /// `options_build_json()`.
 fn options_build_json(options: &[Opt]) -> Option<Json> {
     let mut array = Vec::new();
@@ -845,11 +908,8 @@ fn options_build_json(options: &[Opt]) -> Option<Json> {
     if array.is_empty() { None } else { Some(Json::Array(array)) }
 }
 
-/// `_introspect_cli(..., flags)` for one command without verbs.
-pub fn introspect_cli(cmd: &Command, options: &[Opt], mut flags: u32) -> i32 {
-    if flags == SD_JSON_FORMAT_OFF {
-        flags = SD_JSON_FORMAT_PRETTY_AUTO;
-    }
+/// `command_build_json()`.
+fn command_build_json(cmd: &Command, options: &[Opt]) -> Json {
     let mut c = vec![
         (b"names".to_vec(), Json::strv(cmd.names)),
         (b"project".to_vec(), Json::str("systemd")),
@@ -872,6 +932,12 @@ pub fn introspect_cli(cmd: &Command, options: &[Opt], mut flags: u32) -> i32 {
             if let Some(h) = v.help {
                 o.push((b"abstract".to_vec(), Json::strv(&[h])));
             }
+            if let Some(opts) = v.options.and_then(options_build_json) {
+                o.push((b"options".to_vec(), opts));
+            }
+            if let Some(f) = v.footer {
+                o.push((b"postscript".to_vec(), Json::strv(&[f])));
+            }
             if v.min_args != VERB_ANY {
                 o.push((b"minArguments".to_vec(), Json::Unsigned(v.min_args as u64)));
             }
@@ -891,9 +957,24 @@ pub fn introspect_cli(cmd: &Command, options: &[Opt], mut flags: u32) -> i32 {
     if !verbs.is_empty() {
         c.push((b"verbs".to_vec(), Json::Array(verbs)));
     }
+    Json::Object(c)
+}
+
+/// `_introspect_cli(..., flags)` for one command.
+pub fn introspect_cli(cmd: &Command, options: &[Opt], flags: u32) -> i32 {
+    introspect_cli_commands(&[(cmd, options)], flags)
+}
+
+/// `_introspect_cli(..., flags)` for a multicall binary: one command
+/// object per `COMMAND()`, in order.
+pub fn introspect_cli_commands(cmds: &[(&Command, &[Opt])], mut flags: u32) -> i32 {
+    if flags == SD_JSON_FORMAT_OFF {
+        flags = SD_JSON_FORMAT_PRETTY_AUTO;
+    }
+    let commands: Vec<Json> = cmds.iter().map(|(c, o)| command_build_json(c, o)).collect();
     let w = Json::Object(vec![
         (b"mediaType".to_vec(), Json::str("application/vnd.io.systemd.cli-introspection-0")),
-        (b"commands".to_vec(), Json::Array(vec![Json::Object(c)])),
+        (b"commands".to_vec(), Json::Array(commands)),
     ]);
     out(&dump(&w, flags));
     0

@@ -228,3 +228,34 @@ pub fn opendir(path: &[u8]) -> Result<crate::sys::Dir, i32> {
     let fd = crate::sys::open(path, libc::O_RDONLY | libc::O_NONBLOCK | libc::O_DIRECTORY | libc::O_CLOEXEC, 0)?;
     crate::sys::Dir::from_fd(fd)
 }
+
+/// `socket(AF_UNIX, SOCK_STREAM)` + `connect(path)`, then close: whether
+/// something listens there (`sd_bus_start()` on a `unix:path=` address
+/// fails the same way).
+pub fn unix_connect_probe(path: &[u8]) -> Result<(), i32> {
+    // SAFETY: plain syscalls on a socket this function owns.
+    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK, 0) };
+    if fd < 0 {
+        return Err(neg_errno());
+    }
+    let fd = crate::sys::OwnedFd::new(fd);
+    // SAFETY: an all-zero sockaddr_un is valid.
+    let mut sa: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    sa.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    if path.len() >= sa.sun_path.len() {
+        return Err(-libc::EINVAL);
+    }
+    for (d, s) in sa.sun_path.iter_mut().zip(path) {
+        *d = *s as libc::c_char;
+    }
+    let len = (std::mem::size_of::<libc::sa_family_t>() + path.len() + 1) as libc::socklen_t;
+    // SAFETY: sa is a valid sockaddr_un of length len.
+    let r = unsafe { libc::connect(fd.raw(), &sa as *const libc::sockaddr_un as *const libc::sockaddr, len) };
+    if r < 0 {
+        let e = neg_errno();
+        if e != -libc::EINPROGRESS {
+            return Err(e);
+        }
+    }
+    Ok(())
+}

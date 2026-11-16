@@ -374,3 +374,13 @@ pub fn extract_many_words(
     }
     Ok(out)
 }
+
+/// `strv_split_newlines_full(&l, s, flags)`: lines, without an empty one
+/// at the end.
+pub fn strv_split_newlines_full(s: &[u8], flags: u32) -> Result<Vec<Vec<u8>>, i32> {
+    let mut l = strv_split_full(s, Some(crate::string::NEWLINE), flags)?;
+    if l.last().is_some_and(|x| x.is_empty()) {
+        l.pop();
+    }
+    Ok(l)
+}

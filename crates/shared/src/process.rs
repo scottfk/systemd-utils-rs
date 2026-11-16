@@ -14,6 +14,8 @@ pub const FORK_DEATHSIG_SIGKILL: u32 = 1 << 4;
 pub const FORK_LOG: u32 = 1 << 7;
 pub const FORK_WAIT: u32 = 1 << 8;
 pub const FORK_RLIMIT_NOFILE_SAFE: u32 = 1 << 11;
+pub const FORK_CLOSE_ALL_FDS: u32 = 1 << 1;
+pub const FORK_REARRANGE_STDIO: u32 = 1 << 5;
 
 fn deathsig(flags: u32) -> Option<i32> {
     if flags & FORK_DEATHSIG_SIGTERM != 0 {
@@ -29,6 +31,11 @@ fn deathsig(flags: u32) -> Option<i32> {
 
 /// `pidref_safe_fork(name, flags, &pid)`: `Ok(0)` in the child, the pid in the parent.
 pub fn safe_fork(name: &str, flags: u32) -> Result<i32, i32> {
+    safe_fork_full(name, None, &[], flags)
+}
+
+/// `pidref_safe_fork_full(name, stdio_fds, except_fds, n, flags, &pid)`.
+pub fn safe_fork_full(name: &str, stdio: Option<[i32; 3]>, except: &[i32], flags: u32) -> Result<i32, i32> {
     let prio = if flags & FORK_LOG != 0 { libc::LOG_ERR } else { libc::LOG_DEBUG };
     let original_pid = sys::getpid();
     let block = flags & (FORK_RESET_SIGNALS | FORK_DEATHSIG_SIGTERM | FORK_DEATHSIG_SIGINT) != 0;
@@ -81,12 +88,30 @@ pub fn safe_fork(name: &str, flags: u32) -> Result<i32, i32> {
             sys::exit_now(libc::EXIT_FAILURE);
         }
     }
+    if flags & FORK_REARRANGE_STDIO != 0 {
+        let fds = stdio.unwrap_or([-libc::EBADF; 3]);
+        if let Err(r) = sys::rearrange_stdio(fds) {
+            log_full_errno!(prio, r, "Failed to rearrange stdio fds: ", strerror(r));
+            sys::exit_now(libc::EXIT_FAILURE);
+        }
+    }
+    if flags & FORK_CLOSE_ALL_FDS != 0 {
+        crate::log::log_close();
+        if let Err(r) = sys::close_all_fds_except(except) {
+            log_full_errno!(prio, r, "Failed to close all file descriptors: ", strerror(r));
+            sys::exit_now(libc::EXIT_FAILURE);
+        }
+    }
     if flags & FORK_RLIMIT_NOFILE_SAFE != 0 {
         let r = rlimit_nofile_safe();
         if r < 0 {
             log_full_errno!(prio, r, "Failed to lower RLIMIT_NOFILE's soft limit to 1K: ", strerror(r));
             sys::exit_now(libc::EXIT_FAILURE);
         }
+    }
+    if let Err(r) = sys::unsetenv(b"NOTIFY_SOCKET") {
+        log_full_errno!(prio, r, "Failed to unset $NOTIFY_SOCKET: ", strerror(r));
+        sys::exit_now(libc::EXIT_FAILURE);
     }
     Ok(0)
 }

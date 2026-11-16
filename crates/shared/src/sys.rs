@@ -1735,3 +1735,310 @@ pub fn restore_inherited_sigpipe() {
     // SAFETY: h is SIG_DFL, SIG_IGN or the handler we were started with.
     unsafe { libc::signal(libc::SIGPIPE, h) };
 }
+
+/// `execve(path, argv, envp)`: only returns on failure, with -errno.
+pub fn execve(path: &[u8], argv: &[Vec<u8>], envp: &[Vec<u8>]) -> i32 {
+    let p = to_cstring(path);
+    let a: Vec<CString> = argv.iter().map(|s| to_cstring(s)).collect();
+    let e: Vec<CString> = envp.iter().map(|s| to_cstring(s)).collect();
+    let mut ap: Vec<*const c_char> = a.iter().map(|s| s.as_ptr()).collect();
+    ap.push(std::ptr::null());
+    let mut ep: Vec<*const c_char> = e.iter().map(|s| s.as_ptr()).collect();
+    ep.push(std::ptr::null());
+    // SAFETY: NULL-terminated arrays of valid C strings, alive for the call.
+    unsafe { libc::execve(p.as_ptr(), ap.as_ptr(), ep.as_ptr()) };
+    neg_errno()
+}
+
+/// `close_all_fds(except, n)`: close every fd above 2 but these.
+pub fn close_all_fds_except(keep: &[Fd]) -> Result<(), i32> {
+    let mut k: Vec<Fd> = keep.iter().copied().filter(|&f| f > 2).collect();
+    k.sort_unstable();
+    k.dedup();
+    let mut start: u32 = 3;
+    for &f in &k {
+        let f = f as u32;
+        if f > start {
+            // SAFETY: close_range() only closes descriptors.
+            if unsafe { libc::syscall(libc::SYS_close_range, start, f - 1, 0) } < 0 {
+                return Err(neg_errno());
+            }
+        }
+        start = f + 1;
+    }
+    // SAFETY: as above.
+    if unsafe { libc::syscall(libc::SYS_close_range, start, u32::MAX, 0) } < 0 {
+        return Err(neg_errno());
+    }
+    Ok(())
+}
+
+/// `waitid(P_PID, pid, WEXITED|WNOHANG)`: Some((si_code, si_status)) once
+/// the child has exited.
+pub fn waitid_nohang(pid: i32) -> Result<Option<(i32, i32)>, i32> {
+    // SAFETY: siginfo_t is plain old data.
+    let mut si: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    // SAFETY: si is a valid out-pointer.
+    let r = unsafe { libc::waitid(libc::P_PID, pid as libc::id_t, &mut si, libc::WEXITED | libc::WNOHANG) };
+    if r < 0 {
+        return Err(neg_errno());
+    }
+    // SAFETY: reading the union fields waitid() filled in.
+    let (spid, status) = unsafe { (si.si_pid(), si.si_status()) };
+    if spid == 0 {
+        return Ok(None);
+    }
+    Ok(Some((si.si_code, status)))
+}
+
+/// `ppoll()` on several fds: the revents, in order.  `timeout_usec` of
+/// `u64::MAX` waits forever.
+pub fn poll_many(fds: &[(Fd, i16)], timeout_usec: u64) -> Result<Vec<i16>, i32> {
+    let mut p: Vec<libc::pollfd> = fds.iter().map(|&(fd, events)| libc::pollfd { fd, events, revents: 0 }).collect();
+    let ts = libc::timespec {
+        tv_sec: (timeout_usec / 1_000_000) as libc::time_t,
+        tv_nsec: ((timeout_usec % 1_000_000) * 1000) as libc::c_long,
+    };
+    let tsp = if timeout_usec == u64::MAX { std::ptr::null() } else { &ts as *const libc::timespec };
+    // SAFETY: p is a valid array of pollfd, tsp NULL or valid.
+    let r = unsafe { libc::ppoll(p.as_mut_ptr(), p.len() as libc::nfds_t, tsp, std::ptr::null()) };
+    if r < 0 {
+        return Err(neg_errno());
+    }
+    Ok(p.iter().map(|x| x.revents).collect())
+}
+
+/// `rearrange_stdio(in, out, err)`: negative fds mean /dev/null; the fds
+/// above 2 are closed.  Then `stdio_disable_nonblock()`.
+pub fn rearrange_stdio(fds: [Fd; 3]) -> Result<(), i32> {
+    let null_readable = fds[0] < 0;
+    let null_writable = fds[1] < 0 || fds[2] < 0;
+    let mut null_fd: Fd = -1;
+    let mut copies: [Fd; 3] = [-1; 3];
+    let mut fd = fds;
+    let close_above = |f: Fd| {
+        if f > 2 {
+            // SAFETY: closing a descriptor this function owns.
+            unsafe { libc::close(f) };
+        }
+    };
+    let result = (|| -> Result<(), i32> {
+        if null_readable || null_writable {
+            let mode = if null_readable && null_writable {
+                libc::O_RDWR
+            } else if null_readable {
+                libc::O_RDONLY
+            } else {
+                libc::O_WRONLY
+            };
+            null_fd = open(b"/dev/null", mode | libc::O_CLOEXEC, 0)?;
+            if null_fd < 3 {
+                // SAFETY: fcntl() on a valid fd.
+                let copy = unsafe { libc::fcntl(null_fd, libc::F_DUPFD_CLOEXEC, 3) };
+                if copy < 0 {
+                    return Err(neg_errno());
+                }
+                // SAFETY: as above.
+                unsafe { libc::close(null_fd) };
+                null_fd = copy;
+            }
+        }
+        for i in 0..3 {
+            if fd[i] < 0 {
+                fd[i] = null_fd;
+            } else if fd[i] != i as Fd && fd[i] < 3 {
+                // SAFETY: fcntl() on a valid fd.
+                let c = unsafe { libc::fcntl(fd[i], libc::F_DUPFD_CLOEXEC, 3) };
+                if c < 0 {
+                    return Err(neg_errno());
+                }
+                copies[i] = c;
+                fd[i] = c;
+            }
+        }
+        for (i, &f) in fd.iter().enumerate() {
+            if f == i as Fd {
+                // SAFETY: clearing FD_CLOEXEC on a valid fd.
+                unsafe {
+                    let fl = libc::fcntl(f, libc::F_GETFD);
+                    if fl >= 0 {
+                        libc::fcntl(f, libc::F_SETFD, fl & !libc::FD_CLOEXEC);
+                    }
+                }
+            } else {
+                // SAFETY: dup2() on valid fds.
+                if unsafe { libc::dup2(f, i as Fd) } < 0 {
+                    return Err(neg_errno());
+                }
+            }
+        }
+        Ok(())
+    })();
+    close_above(fds[0]);
+    if fds[1] != fds[0] {
+        close_above(fds[1]);
+    }
+    if fds[2] != fds[0] && fds[2] != fds[1] {
+        close_above(fds[2]);
+    }
+    for c in copies {
+        if c >= 0 {
+            // SAFETY: closing a copy made above.
+            unsafe { libc::close(c) };
+        }
+    }
+    close_above(null_fd);
+    result?;
+    for i in 0..3 {
+        // SAFETY: clearing O_NONBLOCK on stdio.
+        unsafe {
+            let fl = libc::fcntl(i, libc::F_GETFL);
+            if fl >= 0 && fl & libc::O_NONBLOCK != 0 {
+                libc::fcntl(i, libc::F_SETFL, fl & !libc::O_NONBLOCK);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `lstat(path)`.
+pub fn lstat(path: &[u8]) -> Result<Stat, i32> {
+    fstatat(libc::AT_FDCWD, path, libc::AT_SYMLINK_NOFOLLOW)
+}
+
+/// `readlink_malloc(path)`.
+pub fn readlink(path: &[u8]) -> Result<Vec<u8>, i32> {
+    readlinkat(libc::AT_FDCWD, path)
+}
+
+/// `fdopendir(fcntl(fd, F_DUPFD_CLOEXEC, 3))` (`xopendirat(fd, NULL, 0)`).
+pub fn fdopendir_dup(fd: Fd) -> Result<Dir, i32> {
+    // SAFETY: fcntl() on a caller's fd.
+    let d = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
+    if d < 0 {
+        return Err(neg_errno());
+    }
+    let dir = Dir::from_fd(d)?;
+    // SAFETY: rewind to the start, as a fresh opendir() would be.
+    unsafe { libc::rewinddir(dir.0) };
+    Ok(dir)
+}
+
+/// `make_lock_file(path, LOCK_EX)`: create and take an exclusive
+/// open-file-description lock (`LOCK_UNPOSIX`).
+pub fn open_ofd_lock(path: &[u8]) -> Result<Fd, i32> {
+    let fd = open(path, libc::O_CREAT | libc::O_RDWR | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NOCTTY, 0o600)?;
+    let fl =
+        libc::flock { l_type: libc::F_WRLCK as i16, l_whence: libc::SEEK_SET as i16, l_start: 0, l_len: 0, l_pid: 0 };
+    loop {
+        // SAFETY: fl is a valid flock.
+        let r = unsafe { libc::fcntl(fd, libc::F_OFD_SETLKW, &fl) };
+        if r >= 0 {
+            return Ok(fd);
+        }
+        let e = neg_errno();
+        if e == -libc::EINTR {
+            continue;
+        }
+        // SAFETY: closing our fd.
+        unsafe { libc::close(fd) };
+        return Err(if e == -libc::EAGAIN { -libc::EBUSY } else { e });
+    }
+}
+
+/// `futimens_opath(fd, NULL)`: set both times to now, O_PATH fds too.
+pub fn futimens_opath(fd: Fd) -> Result<(), i32> {
+    // SAFETY: utimensat() with AT_EMPTY_PATH and NULL times.
+    if unsafe { libc::utimensat(fd, c"".as_ptr(), std::ptr::null(), libc::AT_EMPTY_PATH) } >= 0 {
+        return Ok(());
+    }
+    let e = neg_errno();
+    if e != -libc::EINVAL {
+        return Err(e);
+    }
+    let p = to_cstring(&crate::fd::proc_fd_path(fd));
+    // SAFETY: as above, through /proc/self/fd/.
+    if unsafe { libc::utimensat(libc::AT_FDCWD, p.as_ptr(), std::ptr::null(), 0) } < 0 {
+        return Err(neg_errno());
+    }
+    Ok(())
+}
+
+/// `pidfd_open(pid, 0)`.
+pub fn pidfd_open(pid: i32) -> Result<Fd, i32> {
+    // SAFETY: a syscall without memory arguments.
+    let r = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+    if r < 0 { Err(neg_errno()) } else { Ok(r as Fd) }
+}
+
+/// `uname().machine`.
+pub fn uname_machine() -> Vec<u8> {
+    // SAFETY: utsname is plain old data.
+    let mut u: libc::utsname = unsafe { std::mem::zeroed() };
+    // SAFETY: u is a valid out-pointer.
+    unsafe { libc::uname(&mut u) };
+    // SAFETY: uname() NUL-terminates the fields.
+    unsafe { CStr::from_ptr(u.machine.as_ptr()) }.to_bytes().to_vec()
+}
+
+/// `unshare(flags)`.
+pub fn unshare(flags: c_int) -> Result<(), i32> {
+    // SAFETY: unshare() has no memory arguments.
+    if unsafe { libc::unshare(flags) } < 0 { Err(neg_errno()) } else { Ok(()) }
+}
+
+/// `mount(source, target, type, flags, data)`.
+pub fn mount(source: Option<&[u8]>, target: &[u8], fstype: Option<&[u8]>, flags: libc::c_ulong) -> Result<(), i32> {
+    let s = source.map(to_cstring);
+    let t = to_cstring(target);
+    let f = fstype.map(to_cstring);
+    // SAFETY: NULL or valid C strings, alive for the call.
+    let r = unsafe {
+        libc::mount(
+            s.as_ref().map_or(std::ptr::null(), |x| x.as_ptr()),
+            t.as_ptr(),
+            f.as_ref().map_or(std::ptr::null(), |x| x.as_ptr()),
+            flags,
+            std::ptr::null(),
+        )
+    };
+    if r < 0 { Err(neg_errno()) } else { Ok(()) }
+}
+
+/// `sigprocmask_many(SIG_BLOCK, NULL, sigs...)`.
+pub fn block_signals(sigs: &[c_int]) -> Result<(), i32> {
+    // SAFETY: sigset_t is plain old data, initialized by sigemptyset().
+    let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
+    // SAFETY: valid set pointer.
+    unsafe { libc::sigemptyset(&mut set) };
+    for &s in sigs {
+        // SAFETY: as above.
+        unsafe { libc::sigaddset(&mut set, s) };
+    }
+    // SAFETY: valid set pointer; the old mask isn't wanted.
+    if unsafe { libc::sigprocmask(libc::SIG_BLOCK, &set, std::ptr::null_mut()) } < 0 {
+        return Err(neg_errno());
+    }
+    Ok(())
+}
+
+/// `__get_cpuid_max(0)`, then `__cpuid_count(leaf, subleaf)`: None if the
+/// leaf is above the highest basic leaf (as `__get_cpuid()` fails).
+#[cfg(target_arch = "x86_64")]
+pub fn cpuid_count(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
+    let r = std::arch::x86_64::__cpuid_count(leaf, subleaf);
+    (r.eax, r.ebx, r.ecx, r.edx)
+}
+
+#[cfg(target_arch = "x86")]
+pub fn cpuid_count(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
+    let r = std::arch::x86::__cpuid_count(leaf, subleaf);
+    (r.eax, r.ebx, r.ecx, r.edx)
+}
+
+/// `pread(fd, buf, offset)`.
+pub fn pread(fd: Fd, buf: &mut [u8], offset: u64) -> Result<usize, i32> {
+    // SAFETY: buf is valid for writes of its length.
+    let n = unsafe { libc::pread64(fd, buf.as_mut_ptr().cast(), buf.len(), offset as libc::off64_t) };
+    if n < 0 { Err(neg_errno()) } else { Ok(n as usize) }
+}

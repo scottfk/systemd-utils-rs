@@ -66,6 +66,7 @@ pub enum Glyph {
     TreeBranch,
     TreeRight,
     TreeSpace,
+    VerticalDotted,
     Bullet,
 }
 
@@ -83,6 +84,7 @@ pub fn glyph_full(code: Glyph, force_utf: bool) -> &'static [u8] {
         Glyph::TreeBranch => ("|-", "├─"),
         Glyph::TreeRight => ("`-", "└─"),
         Glyph::TreeSpace => ("  ", "  "),
+        Glyph::VerticalDotted => (":", "┆"),
         Glyph::Bullet => ("*", "•"),
     };
     if utf { uni.as_bytes() } else { ascii.as_bytes() }
