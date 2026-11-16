@@ -1,0 +1,19 @@
+[package]
+name = "systemd-hwdb"
+description = "Port of systemd-hwdb (src/hwdb)"
+license = "LGPL-2.1-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "systemd-hwdb"
+path = "src/main.rs"
+
+[dependencies]
+libc.workspace = true
+shared = { path = "../shared" }
+
+[lints]
+workspace = true

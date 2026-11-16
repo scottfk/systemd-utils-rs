@@ -438,7 +438,8 @@ fn help_table_group(options: &[Opt]) -> (Table, Option<&'static str>, usize) {
     (table, group, i)
 }
 
-/// `CommandDescription`.
+/// `CommandDescription`, with the command's `VERB()` table (in source
+/// order; empty for a command without verbs).
 #[derive(Debug, Clone, Copy)]
 pub struct Command {
     pub names: &'static [&'static str],
@@ -446,6 +447,250 @@ pub struct Command {
     pub argspec: &'static [&'static str],
     pub footer: Option<&'static str>,
     pub man_pages: &'static [&'static str],
+    pub verbs: &'static [Verb],
+}
+
+/// `VERB_ANY`.
+pub const VERB_ANY: u32 = u32::MAX;
+pub const VERB_DEFAULT: u32 = 1 << 0;
+pub const VERB_ONLINE_ONLY: u32 = 1 << 1;
+pub const VERB_OPTION_REQUIRED: u32 = 1 << 2;
+pub const VERB_GROUP_MARKER: u32 = 1 << 4;
+pub const VERB_DEPRECATED: u32 = 1 << 5;
+
+/// One `VERB()` entry (or a `VERB_GROUP()` marker, whose `verb` is the
+/// group's name).
+#[derive(Debug, Clone, Copy)]
+pub struct Verb {
+    pub verb: &'static str,
+    pub min_args: u32,
+    pub max_args: u32,
+    pub flags: u32,
+    pub argspec: &'static [&'static str],
+    pub help: Option<&'static str>,
+}
+
+impl Verb {
+    /// `VERB(d, v, a, amin, amax, f, h)`.
+    pub const fn new(
+        verb: &'static str,
+        argspec: &'static [&'static str],
+        min_args: u32,
+        max_args: u32,
+        flags: u32,
+        help: Option<&'static str>,
+    ) -> Verb {
+        Verb { verb, min_args, max_args, flags, argspec, help }
+    }
+    /// `VERB_NOARG(d, v, h)`.
+    pub const fn noarg(verb: &'static str, help: &'static str) -> Verb {
+        Verb::new(verb, &[], VERB_ANY, 1, 0, Some(help))
+    }
+    /// `VERB_COMMON_HELP_AUTO_HIDDEN()`.
+    pub const fn help_hidden() -> Verb {
+        Verb::new("help", &[], VERB_ANY, VERB_ANY, 0, None)
+    }
+    /// `VERB_GROUP(gr)`.
+    pub const fn group(name: &'static str) -> Verb {
+        Verb::new(name, &[], 0, 0, VERB_GROUP_MARKER, None)
+    }
+    fn is_group(&self) -> bool {
+        self.flags & VERB_GROUP_MARKER != 0
+    }
+}
+
+/// `strlevenshtein()`.
+pub fn strlevenshtein(x: &[u8], y: &[u8]) -> usize {
+    if x == y {
+        return 0;
+    }
+    if x.is_empty() {
+        return y.len();
+    }
+    if y.is_empty() {
+        return x.len();
+    }
+    let yl = y.len();
+    let mut t0 = vec![0usize; yl + 1];
+    let mut t1: Vec<usize> = (0..=yl).collect();
+    let mut t2 = vec![0usize; yl + 1];
+    for i in 0..x.len() {
+        t2[0] = i + 1;
+        for j in 0..yl {
+            t2[j + 1] = t1[j] + (x[i] != y[j]) as usize;
+            if i > 0 && j > 0 && x[i - 1] == y[j] && x[i] == y[j - 1] && t2[j + 1] > t0[j - 1] + 1 {
+                t2[j + 1] = t0[j - 1] + 1;
+            }
+            if t2[j + 1] > t1[j + 1] + 1 {
+                t2[j + 1] = t1[j + 1] + 1;
+            }
+            if t2[j + 1] > t2[j] + 1 {
+                t2[j + 1] = t2[j] + 1;
+            }
+        }
+        std::mem::swap(&mut t0, &mut t1);
+        std::mem::swap(&mut t1, &mut t2);
+    }
+    t1[yl]
+}
+
+/// `strv_find_closest()`: the shortest completion of name, else the
+/// closest within a Levenshtein distance of 5.
+pub fn strv_find_closest<'a>(l: &[&'a str], name: &[u8]) -> Option<&'a str> {
+    let mut best: Option<(usize, &str)> = None;
+    for s in l {
+        if let Some(e) = s.as_bytes().strip_prefix(name)
+            && best.is_none_or(|(d, _)| e.len() < d)
+        {
+            best = Some((e.len(), s));
+        }
+    }
+    if let Some((_, s)) = best {
+        return Some(s);
+    }
+    for s in l {
+        let d = strlevenshtein(s.as_bytes(), name);
+        if d > 5 {
+            continue;
+        }
+        if best.is_none_or(|(bd, _)| d < bd) {
+            best = Some((d, s));
+        }
+    }
+    best.map(|(_, s)| s)
+}
+
+/// `_dispatch_verb(args, ...)`: which verb to run, and its argv (the verb
+/// alone if none was given and a default verb runs).
+pub fn dispatch_verb(args: &[Vec<u8>], verbs: &'static [Verb]) -> Result<(&'static Verb, Vec<Vec<u8>>), i32> {
+    let name = args.first();
+    let mut left = args.len();
+    let verb = verbs.iter().find(|v| {
+        !v.is_group()
+            && match name {
+                Some(n) => n == v.verb.as_bytes(),
+                None => v.flags & VERB_DEFAULT != 0,
+            }
+    });
+    let Some(verb) = verb else {
+        let names: Vec<&str> = verbs.iter().filter(|v| !v.is_group()).map(|v| v.verb).collect();
+        if let Some(n) = name {
+            if let Some(found) = strv_find_closest(&names, n) {
+                return Err(log_error_errno!(
+                    synthetic(libc::EINVAL),
+                    "Unknown command verb '",
+                    n,
+                    "', did you mean '",
+                    found,
+                    "'?"
+                ));
+            }
+            return Err(log_error_errno!(synthetic(libc::EINVAL), "Unknown command verb '", n, "'."));
+        }
+        if names.len() >= 2 {
+            return Err(log_error_errno!(
+                synthetic(libc::EINVAL),
+                "Command verb required (one of ",
+                names.join(", "),
+                ")."
+            ));
+        }
+        return Err(log_error_errno!(synthetic(libc::EINVAL), "Command verb '", names[0], "' required."));
+    };
+    if name.is_none() {
+        left = 1;
+    }
+    if verb.min_args != VERB_ANY && left < verb.min_args as usize {
+        return Err(log_error_errno!(synthetic(libc::EINVAL), "Too few arguments."));
+    }
+    if verb.max_args != VERB_ANY && left > verb.max_args as usize {
+        return Err(log_error_errno!(synthetic(libc::EINVAL), "Too many arguments."));
+    }
+    // VERB_ONLINE_ONLY is not used by the programs ported so far.
+    debug_assert!(verb.flags & VERB_ONLINE_ONLY == 0);
+    if name.is_none() {
+        return Ok((verb, vec![verb.verb.as_bytes().to_vec()]));
+    }
+    Ok((verb, args.to_vec()))
+}
+
+const VERB_SYNOPSIS_WIDTH_SANE: usize = 25;
+
+/// `find_point_to_break()`: where the part after the break starts.
+fn find_point_to_break(s: &[u8], max_width: usize) -> Option<usize> {
+    if s.len() <= max_width {
+        return None;
+    }
+    let p = s[max_width..]
+        .iter()
+        .position(|&c| c == b' ')
+        .map(|k| k + max_width)
+        .or_else(|| s.iter().rposition(|&c| c == b' '));
+    p.map(|k| k + 1)
+}
+
+/// `verb_add_help_one()`.
+fn verb_add_help_one(table: &mut Table, verb: &Verb) {
+    let is_default = verb.flags & VERB_DEFAULT != 0;
+    let specs: Vec<Option<&str>> = if verb.argspec.is_empty() || verb.argspec[0].is_empty() {
+        vec![None]
+    } else {
+        verb.argspec.iter().map(|s| Some(*s)).collect()
+    };
+    let mut cell: Vec<u8> = Vec::new();
+    for spec in specs {
+        let s = bcat!(
+            "  ",
+            if is_default { "[" } else { "" },
+            verb.verb,
+            if spec.is_some() { " " } else { "" },
+            spec.unwrap_or_default(),
+            if is_default { "]" } else { "" },
+            if verb.flags & VERB_OPTION_REQUIRED != 0 { " OPTION" } else { "" }
+        );
+        let mut ss: Option<Vec<u8>> = None;
+        if (columns() as usize) < VERB_SYNOPSIS_WIDTH_SANE * 4
+            && let Some(p) = find_point_to_break(&s, VERB_SYNOPSIS_WIDTH_SANE)
+        {
+            let s1 = &s[..p];
+            let rest = &s[p..];
+            ss = Some(match find_point_to_break(rest, VERB_SYNOPSIS_WIDTH_SANE - 4) {
+                Some(p2) => bcat!(s1, "\n    ", &rest[..p2], "\n    ", &rest[p2..]),
+                None => bcat!(s1, "\n    ", rest),
+            });
+        }
+        if !cell.is_empty() {
+            cell.push(b'\n');
+        }
+        cell.extend(ss.unwrap_or(s));
+    }
+    table.add(Cell::String(cell));
+    table.add(Cell::StrvWrapped(strv_split(verb.help.unwrap_or_default().as_bytes(), crate::string::WHITESPACE)));
+}
+
+/// `verbs_get_help_table(verbs, group)`: (table, entries consumed).
+fn verbs_help_table(verbs: &[Verb], group: Option<&str>) -> (Table, usize) {
+    let mut table = Table::new(&["verb", "help"]);
+    let mut in_group = group.is_none();
+    let mut i = 0;
+    while i < verbs.len() {
+        let v = &verbs[i];
+        if !in_group {
+            in_group = v.is_group() && Some(v.verb) == group;
+            i += 1;
+            continue;
+        }
+        if v.is_group() {
+            break;
+        }
+        i += 1;
+        if v.flags & VERB_DEPRECATED != 0 || v.help.is_none() {
+            continue;
+        }
+        verb_add_help_one(&mut table, v);
+    }
+    table.set_header(false);
+    (table, i)
 }
 
 /// `help_cmdline()`.
@@ -499,6 +744,8 @@ pub fn command_print_help(cmd: &Command, options: &[Opt], pager_flags: Option<u3
         for spec in cmd.argspec {
             help_cmdline(&bcat!("[OPTION…] ", spec));
         }
+    } else if cmd.verbs.iter().any(|v| v.help.is_some()) {
+        help_cmdline("[OPTION…] COMMAND …".as_bytes());
     } else {
         help_cmdline(b"[OPTION\xe2\x80\xa6]");
     }
@@ -508,8 +755,15 @@ pub fn command_print_help(cmd: &Command, options: &[Opt], pager_flags: Option<u3
         return r;
     }
 
-    // print_verb_option_help(): no verbs, so only the option groups.
+    // print_verb_option_help(): the verb groups, then the option groups.
     let mut tables: Vec<(Table, &'static str)> = Vec::new();
+    let mut i = 0;
+    while i < cmd.verbs.len() {
+        let group = if cmd.verbs[i].is_group() { Some(cmd.verbs[i].verb) } else { None };
+        let (t, n) = verbs_help_table(&cmd.verbs[i..], group);
+        tables.push((t, group.unwrap_or("Commands")));
+        i += n;
+    }
     let mut i = 0;
     while i < options.len() {
         if options[i].flags & OPTION_NAMESPACE_MARKER != 0 {
@@ -609,10 +863,54 @@ pub fn introspect_cli(cmd: &Command, options: &[Opt], mut flags: u32) -> i32 {
     if let Some(o) = options_build_json(options) {
         c.push((b"options".to_vec(), o));
     }
+    let verbs: Vec<Json> = cmd
+        .verbs
+        .iter()
+        .filter(|v| !v.is_group())
+        .map(|v| {
+            let mut o = vec![(b"names".to_vec(), Json::strv(&[v.verb]))];
+            if let Some(h) = v.help {
+                o.push((b"abstract".to_vec(), Json::strv(&[h])));
+            }
+            if v.min_args != VERB_ANY {
+                o.push((b"minArguments".to_vec(), Json::Unsigned(v.min_args as u64)));
+            }
+            if v.max_args != VERB_ANY {
+                o.push((b"maxArguments".to_vec(), Json::Unsigned(v.max_args as u64)));
+            }
+            for (flag, name) in
+                [(VERB_DEFAULT, "isDefault"), (VERB_DEPRECATED, "isDeprecated"), (VERB_ONLINE_ONLY, "isOnlineOnly")]
+            {
+                if v.flags & flag != 0 {
+                    o.push((name.as_bytes().to_vec(), Json::Bool(true)));
+                }
+            }
+            Json::Object(o)
+        })
+        .collect();
+    if !verbs.is_empty() {
+        c.push((b"verbs".to_vec(), Json::Array(verbs)));
+    }
     let w = Json::Object(vec![
         (b"mediaType".to_vec(), Json::str("application/vnd.io.systemd.cli-introspection-0")),
         (b"commands".to_vec(), Json::Array(vec![Json::Object(c)])),
     ]);
     out(&dump(&w, flags));
     0
+}
+
+/// `should_bypass(env_prefix)` (`verbs.c`).
+pub fn should_bypass(env_prefix: &str) -> bool {
+    let env = format!("{env_prefix}_BYPASS");
+    match crate::env::getenv_bool(&env) {
+        Err(r) if r != -libc::ENXIO => {
+            crate::log_debug_errno!(r, "Failed to parse $", env, ", assuming no: ", crate::errno::strerror(r));
+            false
+        }
+        Ok(true) => {
+            crate::log_debug!("$", env, " is enabled, skipping execution.");
+            true
+        }
+        _ => false,
+    }
 }

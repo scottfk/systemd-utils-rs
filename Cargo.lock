@@ -16,6 +16,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "systemd-hwdb"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "shared",
+]
+
+[[package]]
 name = "systemd-sysctl"
 version = "0.1.0"
 dependencies = [

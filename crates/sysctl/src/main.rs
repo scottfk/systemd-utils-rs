@@ -53,6 +53,7 @@ const COMMAND: Command = Command {
     argspec: &["[CONFIGURATION FILE…]"],
     footer: None,
     man_pages: &["systemd-sysctl.service(8)"],
+    verbs: &[],
 };
 
 #[derive(Debug, Default)]

@@ -87,6 +87,7 @@ const COMMAND: Command = Command {
     argspec: &["[CONFIGURATION FILE…]"],
     footer: None,
     man_pages: &["systemd-tmpfiles(8)"],
+    verbs: &[],
 };
 
 /// The `arg_*` globals.
@@ -484,22 +485,6 @@ fn cat_config(config_dirs: &[Vec<u8>]) -> i32 {
     cat_files(None, &files, args().cat_flags)
 }
 
-/// `should_bypass(env_prefix)` (`verbs.c`).
-fn should_bypass(env_prefix: &str) -> bool {
-    let env = format!("{env_prefix}_BYPASS");
-    match shared::env::getenv_bool(&env) {
-        Err(r) if r != -libc::ENXIO => {
-            log_debug_errno!(r, "Failed to parse $", env, ", assuming no: ", strerror(r));
-            false
-        }
-        Ok(true) => {
-            log_debug!("$", env, " is enabled, skipping execution.");
-            true
-        }
-        _ => false,
-    }
-}
-
 /// `rlimit_nofile_bump(HIGH_RLIMIT_NOFILE)`.
 fn rlimit_nofile_bump() {
     const HIGH_RLIMIT_NOFILE: u64 = 512 * 1024;
@@ -576,7 +561,7 @@ fn run(argv: Vec<Vec<u8>>) -> i32 {
         return cat_config(&config_dirs);
     }
 
-    if should_bypass("SYSTEMD_TMPFILES") {
+    if shared::options::should_bypass("SYSTEMD_TMPFILES") {
         return 0;
     }
 
