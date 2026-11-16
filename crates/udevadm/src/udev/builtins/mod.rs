@@ -3,6 +3,7 @@
 
 pub mod blkid;
 pub mod btrfs;
+pub mod dissect_image;
 pub mod factory_reset;
 pub mod hwdb;
 pub mod input_id;

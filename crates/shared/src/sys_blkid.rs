@@ -16,6 +16,7 @@ pub const BLKID_SUBLKS_USAGE: c_int = 1 << 7;
 pub const BLKID_SUBLKS_VERSION: c_int = 1 << 8;
 pub const BLKID_SUBLKS_FSINFO: c_int = 1 << 11;
 pub const BLKID_FLTR_NOTIN: c_int = 1;
+pub const BLKID_FLTR_ONLYIN: c_int = 2;
 pub const BLKID_USAGE_RAID: c_int = 1 << 2;
 pub const BLKID_PARTS_ENTRY_DETAILS: c_int = 1 << 2;
 
@@ -70,6 +71,9 @@ struct Lib {
     free_probe: unsafe extern "C" fn(Pr),
     new_probe: unsafe extern "C" fn() -> Pr,
     partition_get_flags: unsafe extern "C" fn(Part) -> c_ulonglong,
+    partition_get_partno: unsafe extern "C" fn(Part) -> c_int,
+    partition_get_size: unsafe extern "C" fn(Part) -> i64,
+    partition_get_start: unsafe extern "C" fn(Part) -> i64,
     partition_get_name: unsafe extern "C" fn(Part) -> *const c_char,
     partition_get_type_string: unsafe extern "C" fn(Part) -> *const c_char,
     partition_get_uuid: unsafe extern "C" fn(Part) -> *const c_char,
@@ -78,6 +82,7 @@ struct Lib {
     partlist_numof_partitions: unsafe extern "C" fn(PartList) -> c_int,
     probe_enable_partitions: unsafe extern "C" fn(Pr, c_int) -> c_int,
     probe_enable_superblocks: unsafe extern "C" fn(Pr, c_int) -> c_int,
+    probe_filter_superblocks_type: unsafe extern "C" fn(Pr, c_int, *mut *mut c_char) -> c_int,
     probe_filter_superblocks_usage: unsafe extern "C" fn(Pr, c_int, c_int) -> c_int,
     probe_get_fd: unsafe extern "C" fn(Pr) -> c_int,
     probe_get_partitions: unsafe extern "C" fn(Pr) -> PartList,
@@ -89,6 +94,7 @@ struct Lib {
     probe_set_device: unsafe extern "C" fn(Pr, c_int, i64, i64) -> c_int,
     probe_set_hint: unsafe extern "C" fn(Pr, *const c_char, u64) -> c_int,
     probe_set_partitions_flags: unsafe extern "C" fn(Pr, c_int) -> c_int,
+    probe_set_sectorsize: unsafe extern "C" fn(Pr, std::ffi::c_uint) -> c_int,
     probe_set_superblocks_flags: unsafe extern "C" fn(Pr, c_int) -> c_int,
     safe_string: unsafe extern "C" fn(*const c_char, *mut c_char, usize) -> c_int,
 }
@@ -115,6 +121,9 @@ fn lib_at(log_level: i32) -> Result<&'static Lib, i32> {
                 free_probe: std::mem::transmute(f("blkid_free_probe")),
                 new_probe: std::mem::transmute(f("blkid_new_probe")),
                 partition_get_flags: std::mem::transmute(f("blkid_partition_get_flags")),
+                partition_get_partno: std::mem::transmute(f("blkid_partition_get_partno")),
+                partition_get_size: std::mem::transmute(f("blkid_partition_get_size")),
+                partition_get_start: std::mem::transmute(f("blkid_partition_get_start")),
                 partition_get_name: std::mem::transmute(f("blkid_partition_get_name")),
                 partition_get_type_string: std::mem::transmute(f("blkid_partition_get_type_string")),
                 partition_get_uuid: std::mem::transmute(f("blkid_partition_get_uuid")),
@@ -123,6 +132,7 @@ fn lib_at(log_level: i32) -> Result<&'static Lib, i32> {
                 partlist_numof_partitions: std::mem::transmute(f("blkid_partlist_numof_partitions")),
                 probe_enable_partitions: std::mem::transmute(f("blkid_probe_enable_partitions")),
                 probe_enable_superblocks: std::mem::transmute(f("blkid_probe_enable_superblocks")),
+                probe_filter_superblocks_type: std::mem::transmute(f("blkid_probe_filter_superblocks_type")),
                 probe_filter_superblocks_usage: std::mem::transmute(f("blkid_probe_filter_superblocks_usage")),
                 probe_get_fd: std::mem::transmute(f("blkid_probe_get_fd")),
                 probe_get_partitions: std::mem::transmute(f("blkid_probe_get_partitions")),
@@ -134,6 +144,7 @@ fn lib_at(log_level: i32) -> Result<&'static Lib, i32> {
                 probe_set_device: std::mem::transmute(f("blkid_probe_set_device")),
                 probe_set_hint: std::mem::transmute(f("blkid_probe_set_hint")),
                 probe_set_partitions_flags: std::mem::transmute(f("blkid_probe_set_partitions_flags")),
+                probe_set_sectorsize: std::mem::transmute(f("blkid_probe_set_sectorsize")),
                 probe_set_superblocks_flags: std::mem::transmute(f("blkid_probe_set_superblocks_flags")),
                 safe_string: std::mem::transmute(f("blkid_safe_string")),
             }
@@ -216,6 +227,27 @@ impl Partition {
         // SAFETY: as above.
         unsafe { (lib().partition_get_flags)(self.0) }
     }
+    /// `blkid_partition_get_partno()`, with errno reset first: (value, errno).
+    pub fn partno(&self) -> (i32, i32) {
+        crate::sys::set_errno(0);
+        // SAFETY: as above.
+        let v = unsafe { (lib().partition_get_partno)(self.0) };
+        (v, errno())
+    }
+    /// `blkid_partition_get_start()`: (value, errno).
+    pub fn start(&self) -> (i64, i32) {
+        crate::sys::set_errno(0);
+        // SAFETY: as above.
+        let v = unsafe { (lib().partition_get_start)(self.0) };
+        (v, errno())
+    }
+    /// `blkid_partition_get_size()`: (value, errno).
+    pub fn size(&self) -> (i64, i32) {
+        crate::sys::set_errno(0);
+        // SAFETY: as above.
+        let v = unsafe { (lib().partition_get_size)(self.0) };
+        (v, errno())
+    }
 }
 
 /// A probe's partition list.
@@ -296,6 +328,31 @@ impl Probe {
     pub fn set_partitions_flags(&self, flags: c_int) {
         // SAFETY: live probe.
         unsafe { (lib().probe_set_partitions_flags)(self.0, flags) };
+    }
+    /// `blkid_probe_filter_superblocks_type(pr, flag, names)`: Err(errno)
+    /// on failure.
+    pub fn filter_superblocks_type(&self, flag: c_int, names: &[Vec<u8>]) -> Result<(), i32> {
+        let c: Vec<std::ffi::CString> = names.iter().map(|n| crate::bytes::to_cstring(n)).collect();
+        let mut ptrs: Vec<*mut c_char> = c.iter().map(|s| s.as_ptr() as *mut c_char).collect();
+        ptrs.push(std::ptr::null_mut());
+        crate::sys::set_errno(0);
+        // SAFETY: live probe; a NULL-terminated array of NUL-terminated strings, which libblkid only reads.
+        if unsafe { (lib().probe_filter_superblocks_type)(self.0, flag, ptrs.as_mut_ptr()) } != 0 {
+            return Err(errno());
+        }
+        Ok(())
+    }
+    /// `blkid_probe_set_sectorsize()`: Err(errno) on failure.
+    pub fn set_sectorsize(&self, sz: u32) -> Result<(), i32> {
+        crate::sys::set_errno(0);
+        // SAFETY: live probe.
+        if unsafe { (lib().probe_set_sectorsize)(self.0, sz) } != 0 { Err(errno()) } else { Ok(()) }
+    }
+    /// `blkid_probe_set_device(pr, fd, offset, size)`: Err(errno) on failure.
+    pub fn set_device_range(&self, fd: i32, offset: i64, size: i64) -> Result<(), i32> {
+        crate::sys::set_errno(0);
+        // SAFETY: live probe; fd stays open while the probe is used.
+        if unsafe { (lib().probe_set_device)(self.0, fd, offset, size) } != 0 { Err(errno()) } else { Ok(()) }
     }
     /// `blkid_probe_get_size()`.
     pub fn size(&self) -> i64 {

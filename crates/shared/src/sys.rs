@@ -1634,6 +1634,13 @@ pub fn ioctl_ptr<T: Copy>(fd: Fd, req: u64, arg: &mut T) -> Result<c_int, i32> {
     if r < 0 { Err(neg_errno()) } else { Ok(r) }
 }
 
+/// `ioctl(fd, req, value)` with an integer argument.
+pub fn ioctl_int(fd: Fd, req: u64, value: libc::c_ulong) -> Result<c_int, i32> {
+    // SAFETY: the request takes its argument by value, no pointers.
+    let r = unsafe { libc::ioctl(fd, req as _, value) };
+    if r < 0 { Err(neg_errno()) } else { Ok(r) }
+}
+
 /// `ioctl(fd, req)` with no argument.
 pub fn ioctl_none(fd: Fd, req: u64) -> Result<c_int, i32> {
     // SAFETY: the request takes no argument.

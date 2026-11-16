@@ -4,9 +4,9 @@
 //! `EOPNOTSUPP`.
 
 use shared::errno::strerror;
+use shared::log_device_debug_errno;
 use shared::printo;
 use shared::string::WHITESPACE;
-use shared::{log_device_debug, log_device_debug_errno};
 
 use super::event::Event;
 
@@ -85,7 +85,12 @@ struct Hooks {
 fn hooks() -> Vec<Hooks> {
     use super::builtins as b;
     vec![
-        Hooks { cmd: BuiltinCommand::DissectImage, init: Some(dissect_image_init), exit: None, should_reload: None },
+        Hooks {
+            cmd: BuiltinCommand::DissectImage,
+            init: Some(b::dissect_image::init),
+            exit: Some(b::dissect_image::exit),
+            should_reload: None,
+        },
         Hooks {
             cmd: BuiltinCommand::Hwdb,
             init: Some(b::hwdb::init),
@@ -106,13 +111,6 @@ fn hooks() -> Vec<Hooks> {
             should_reload: Some(b::net_setup_link::should_reload),
         },
     ]
-}
-
-/// dissect_image's init: until it is ported, what has an effect later: it
-/// reads the kernel command line, and with it, detects (and caches)
-/// whether we run in a container.
-fn dissect_image_init() {
-    let _ = shared::proc_cmdline::proc_cmdline_get_key(b"systemd.image_policy", false);
 }
 
 /// `udev_builtin_init()`.
@@ -203,6 +201,7 @@ pub fn udev_builtin_run(event: &mut Event, cmd: BuiltinCommand, command: &[u8]) 
     match cmd {
         BuiltinCommand::Blkid => b::blkid::run(event, &argv),
         BuiltinCommand::Btrfs => b::btrfs::run(event, &argv),
+        BuiltinCommand::DissectImage => b::dissect_image::run(event, &argv),
         BuiltinCommand::FactoryReset => b::factory_reset::run(event, &argv),
         BuiltinCommand::Hwdb => b::hwdb::run(event, &argv),
         BuiltinCommand::InputId => b::input_id::run(event, &argv),
@@ -214,14 +213,9 @@ pub fn udev_builtin_run(event: &mut Event, cmd: BuiltinCommand, command: &[u8]) 
         BuiltinCommand::UsbId => b::usb_id::run(event, &argv),
         BuiltinCommand::PathId => b::path_id::run(event, &argv),
         BuiltinCommand::Uaccess => b::uaccess::run(event, &argv),
-        _ => {
-            log_device_debug!(event.dev, "Built-in command '", builtin(cmd).name, "' is not ported yet.");
-            Err(-libc::EOPNOTSUPP)
-        }
     }
 }
 
-/// `udev_builtin_add_property(event, key, val)`.
 /// `udev_builtin_import_property(event, key)`: copies the property from
 /// the database clone; Ok(true) if it was there.
 pub fn udev_builtin_import_property(event: &Event, key: &[u8]) -> Result<bool, i32> {
@@ -244,6 +238,7 @@ pub fn udev_builtin_import_property(event: &Event, key: &[u8]) -> Result<bool, i
     Ok(true)
 }
 
+/// `udev_builtin_add_property(event, key, val)`.
 pub fn udev_builtin_add_property(event: &Event, key: &[u8], val: Option<&[u8]>) -> Result<(), i32> {
     let val = val.filter(|v| !v.is_empty());
     if let Err(r) = event.dev.add_property(key, val) {
