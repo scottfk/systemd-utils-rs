@@ -196,6 +196,166 @@ fn update_clone(event: &mut Event) -> Result<(), i32> {
     Ok(())
 }
 
+/// `device_rename(device, name)`.
+fn device_rename(dev: &Dev, name: &[u8]) -> Result<(), i32> {
+    if !shared::path::filename_is_valid(name) {
+        return Err(-libc::EINVAL);
+    }
+    let syspath = dev.get_syspath();
+    let mut new = shared::path::path_extract_directory(syspath.bytes())?;
+    new = shared::path::path_join(&[&new, name]);
+    if !shared::path::path_is_safe(&new) {
+        return Err(-libc::EINVAL);
+    }
+    dev.set_syspath(&new, false)?;
+    let Ok(old) = dev.get_ifname() else { return Ok(()) };
+    let old = old.bytes().to_vec();
+    dev.add_property_internal(b"INTERFACE_OLD", Some(&old))?;
+    dev.add_property_internal(b"INTERFACE", Some(name))
+}
+
+/// `rename_netif()`: Ok(true) if renamed.
+fn rename_netif(event: &mut Event) -> Result<bool, i32> {
+    if !event.destructive() {
+        return Ok(false);
+    }
+    let Some(name) = event.name.clone() else { return Ok(false) };
+    let dev = event.dev.clone();
+    let ifindex = match dev.get_ifindex() {
+        Err(r) if r == -libc::ENOENT => return Ok(false),
+        Err(r) => return Err(log_device_warning_errno!(dev, r, "Failed to get ifindex: ", strerror(r))),
+        Ok(i) => i,
+    };
+    if !shared::netlink::ifname_valid(&name) {
+        shared::log_device_warning!(dev, "Invalid network interface name, ignoring: ", &name[..]);
+        return Ok(false);
+    }
+    let old_sysname = match dev.get_ifname() {
+        Err(r) => return Err(log_device_warning_errno!(dev, r, "Failed to get ifname: ", strerror(r))),
+        Ok(s) => s.bytes().to_vec(),
+    };
+    if old_sysname == name {
+        return Ok(false);
+    }
+    let old_syspath = dev.get_syspath().bytes().to_vec();
+    let clone = event.dev_db_clone.clone().expect("cloned");
+    let r = (|| -> Result<(), i32> {
+        if let Err(r) = device_rename(&dev, &name) {
+            return Err(log_device_warning_errno!(
+                clone,
+                r,
+                "Failed to update properties with new name '",
+                &name[..],
+                "': ",
+                strerror(r)
+            ));
+        }
+        for (d, key) in [(&dev, &b"ID_RENAMING"[..]), (&clone, b"ID_RENAMING"), (&clone, b"ID_PROCESSING")] {
+            if let Err(r) = d.add_property(key, Some(b"1")) {
+                return Err(log_device_warning_errno!(clone, r, "Failed to add '", key, "' property: ", strerror(r)));
+            }
+        }
+        if let Err(r) = clone.update_db() {
+            return Err(log_device_debug_errno!(
+                clone,
+                r,
+                "Failed to update database under /run/udev/data/: ",
+                strerror(r)
+            ));
+        }
+        match shared::netlink::rtnl_set_link_name(ifindex, Some(&name), &event.altnames) {
+            Err(r) if r == -libc::EBUSY => {
+                shared::log_device_info!(
+                    clone,
+                    "Network interface '",
+                    &old_sysname[..],
+                    "' is already up, cannot rename to '",
+                    &name[..],
+                    "'."
+                );
+                Err(0)
+            }
+            Err(r) => Err(log_device_error_errno!(
+                clone,
+                r,
+                "Failed to rename network interface ",
+                ifindex.to_string(),
+                " from '",
+                &old_sysname[..],
+                "' to '",
+                &name[..],
+                "': ",
+                strerror(r)
+            )),
+            Ok(()) => Ok(()),
+        }
+    })();
+    let r = match r {
+        Ok(()) => {
+            shared::log_device_debug!(
+                dev,
+                "Network interface ",
+                ifindex.to_string(),
+                " is renamed from '",
+                &old_sysname[..],
+                "' to '",
+                &name[..],
+                "'"
+            );
+            return Ok(true);
+        }
+        Err(r) => r,
+    };
+    // revert
+    let _ = clone.add_property(b"ID_RENAMING", None);
+    let _ = clone.add_property(b"ID_PROCESSING", None);
+    let _ = clone.update_db();
+    let _ = dev.set_syspath(&old_syspath, false);
+    if let Ok(s) = dev.get_property_value(b"INTERFACE_OLD") {
+        let s = s.bytes().to_vec();
+        let _ = dev.add_property_internal(b"INTERFACE", Some(&s));
+        let _ = dev.add_property_internal(b"INTERFACE_OLD", None);
+    }
+    let _ = dev.add_property(b"ID_RENAMING", None);
+    if r < 0 {
+        let _ = dev.update_db();
+        return Err(r);
+    }
+    Ok(false)
+}
+
+/// `assign_altnames()`.
+fn assign_altnames(event: &mut Event) {
+    if !event.destructive() || event.altnames.is_empty() {
+        return;
+    }
+    let dev = event.dev.clone();
+    let ifindex = match dev.get_ifindex() {
+        Err(r) if r == -libc::ENOENT => return,
+        Err(r) => {
+            log_device_warning_errno!(dev, r, "Failed to get ifindex: ", strerror(r));
+            return;
+        }
+        Ok(i) => i,
+    };
+    let s = match dev.get_ifname() {
+        Err(r) => {
+            log_device_warning_errno!(dev, r, "Failed to get ifname: ", strerror(r));
+            return;
+        }
+        Ok(s) => s.bytes().to_vec(),
+    };
+    event.altnames.retain(|a| *a != s);
+    if let Err(r) = shared::netlink::rtnl_set_link_name(ifindex, None, &event.altnames) {
+        shared::sd_device::log_device_full(
+            Some(&dev),
+            if r == -libc::EOPNOTSUPP { shared::log::LOG_DEBUG } else { shared::log::LOG_WARNING },
+            r,
+            shared::bcat!("Could not set AlternativeName= or apply AlternativeNamesPolicy=, ignoring: ", strerror(r)),
+        );
+    }
+}
+
 /// `udev_event_execute_rules(event, rules)`.
 pub fn udev_event_execute_rules(event: &mut Event, rules: &Rules) -> Result<(), i32> {
     let dev = event.dev.clone();
@@ -219,18 +379,9 @@ pub fn udev_event_execute_rules(event: &mut Event, rules: &Rules) -> Result<(), 
         return Err(log_device_debug_errno!(dev, r, "Failed to apply udev rules: ", strerror(r)));
     }
     if action == Action::Add {
-        // rename_netif() and assign_altnames() only do something in
-        // destructive mode, which is udevd's (phase 6).
-        if event.destructive()
-            && let Some(name) = &event.name
-            && dev.get_ifindex().is_ok()
-            && dev.get_ifname().is_ok_and(|n| n.bytes() != &name[..])
-        {
-            return Err(log_device_error_errno!(
-                dev,
-                shared::errno::synthetic(libc::EOPNOTSUPP),
-                "Renaming network interfaces is not ported yet."
-            ));
+        match rename_netif(event)? {
+            false => assign_altnames(event),
+            true => {}
         }
     }
     update_devnode(event)?;

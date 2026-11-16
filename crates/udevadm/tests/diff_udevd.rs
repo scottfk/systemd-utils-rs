@@ -584,3 +584,29 @@ stop
 "#,
     );
 }
+
+#[test]
+fn rename() {
+    check(
+        "rename",
+        r#"
+cat > /run/udev/rules.d/50-t.rules <<'EOF'
+SUBSYSTEM!="net", GOTO="end"
+ACTION=="add", KERNEL=="r0", NAME="renamed0", ENV{WAS}="r0"
+ACTION=="add", KERNEL=="r1", NAME="bad/name"
+ACTION=="move", ENV{MOVED}="$env{INTERFACE_OLD}"
+LABEL="end"
+EOF
+start -c 1
+"$U" control -s
+link r0 r1
+quiet
+"$U" control -S
+settle
+ip -br link | awk '{print $1}' | sort
+info /sys/class/net/renamed0
+info /sys/class/net/r1
+stop
+"#,
+    );
+}
