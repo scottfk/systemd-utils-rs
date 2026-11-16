@@ -211,19 +211,20 @@ then runs the test suites (so far, the differential cases of phases 1 to 4):
 
 ## Roadmap
 
-1. **sysctl:** `systemd-sysctl`, along with the shared groundwork: logging, the
+1. **sysctl (done, branch `phase1-sysctl`):** `systemd-sysctl`, along with the shared groundwork: logging, the
    `conf-files` search paths and drop-ins, the `--cat-config` pager output and
    option parsing.
-2. **tmpfiles:** every line type and modifier, `--create`/`--clean`/`--remove`/
+2. **tmpfiles (done, branch `phase2-tmpfiles`):** every line type and modifier, `--create`/`--clean`/`--remove`/
    `--purge`, `--boot`, `--prefix`/`--exclude-prefix`, `--root`, specifiers, ACLs
    (libacl via `dlopen`), file attributes, and the age-based clean.
-3. **hwdb:** the `.hwdb` parser and the `hwdb.bin` writer (`systemd-hwdb` and
+3. **hwdb (done, branch `phase3-hwdb`):** the `.hwdb` parser and the `hwdb.bin` writer (`systemd-hwdb` and
    `udevadm hwdb`), and sd-hwdb lookups; the compiled database must be byte-identical.
-4. **libudev:** sd-device and sd-device-monitor, the enumerator, the udev database
+4. **libudev (done, branch `phase4-libudev`):** sd-device and sd-device-monitor, the enumerator, the udev database
    reader, and the `libudev.so.1` C ABI for both ABIs, with its version script.
-5. **The rules engine:** `udev-rules.c`, formatting and substitutions, `udevadm test`,
+5. **The rules engine (done, branch `phase5-rules`):** `udev-rules.c`, formatting and substitutions, `udevadm test`,
    `info`, `verify` and `cat`, node and link handling, the database writer.
-6. **udevd:** the manager and workers, the netlink monitor, inotify watches, the
+   Node and link handling still has to be tested in the VM (phase 6).
+6. **udevd (next):** the manager and workers, the netlink monitor, inotify watches, the
    control socket and varlink, and `udevadm trigger`, `settle`, `control`, `monitor`,
    `wait`, `lock`; boot-tested in the VM.
 7. **Builtins and helpers:** `blkid`, `btrfs`, `hwdb`, `input_id`, `keyboard`, `kmod`,
