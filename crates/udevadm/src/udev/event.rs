@@ -378,11 +378,8 @@ pub fn udev_event_execute_rules(event: &mut Event, rules: &Rules) -> Result<(), 
     if let Err(r) = rules.apply_to_event(event) {
         return Err(log_device_debug_errno!(dev, r, "Failed to apply udev rules: ", strerror(r)));
     }
-    if action == Action::Add {
-        match rename_netif(event)? {
-            false => assign_altnames(event),
-            true => {}
-        }
+    if action == Action::Add && !rename_netif(event)? {
+        assign_altnames(event);
     }
     update_devnode(event)?;
     if let Err(r) = dev.ensure_usec_initialized(Some(&clone)) {

@@ -383,7 +383,8 @@ fn add_memory_pressure(ev: &mut Ev) -> Result<(), i32> {
             )?);
             if fmt == libc::S_IFREG {
                 let t = sys::fstatfs_type(fd.raw())?;
-                if t != libc::PROC_SUPER_MAGIC && t != 0x63677270 {
+                // PROC_SUPER_MAGIC, CGROUP2_SUPER_MAGIC
+                if t != 0x9fa0 && t != 0x63677270 {
                     return Err(-libc::ENOTTY);
                 }
                 (fd, libc::EPOLLPRI as u32)

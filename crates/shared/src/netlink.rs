@@ -87,7 +87,7 @@ fn push_attr(req: &mut Vec<u8>, ty: u16, payload: &[u8]) {
     req.extend_from_slice(&((4 + payload.len()) as u16).to_ne_bytes());
     req.extend_from_slice(&ty.to_ne_bytes());
     req.extend_from_slice(payload);
-    while req.len() % 4 != 0 {
+    while !req.len().is_multiple_of(4) {
         req.push(0);
     }
 }
