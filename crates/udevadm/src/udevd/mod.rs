@@ -214,14 +214,13 @@ fn dlopen_libraries() {
     let _ = shared::sys_acl::dlopen_libacl(shared::log::LOG_DEBUG);
     let _ = shared::sys_blkid::dlopen_libblkid(shared::log::LOG_DEBUG);
     let _ = shared::sys_kmod::dlopen_libkmod(shared::log::LOG_DEBUG);
-    for lib in ["libmount.so.1"] {
-        match shared::sys_acl::dlopen_probe(lib.as_bytes()) {
-            Ok(()) => {
-                log_debug!("Loaded shared library '", lib, "' via dlopen().");
-            }
-            Err((r, dle)) => {
-                log_debug!("Shared library '", lib, "' is not available: ", dle.unwrap_or_else(|| strerror(r)));
-            }
+    let lib = "libmount.so.1";
+    match shared::sys_acl::dlopen_probe(lib.as_bytes()) {
+        Ok(()) => {
+            log_debug!("Loaded shared library '", lib, "' via dlopen().");
+        }
+        Err((r, dle)) => {
+            log_debug!("Shared library '", lib, "' is not available: ", dle.unwrap_or_else(|| strerror(r)));
         }
     }
     log_debug_errno!(shared::errno::synthetic(libc::EOPNOTSUPP), "TPM2 support is not compiled in.");
