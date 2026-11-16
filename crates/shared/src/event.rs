@@ -389,9 +389,15 @@ impl<T> Event<T> {
             Kind::Io { fd, registered: true, .. } => {
                 let _ = sys::epoll_ctl(self.epoll_fd, libc::EPOLL_CTL_DEL, fd, 0, 0);
             }
-            Kind::Child { pidfd, registered, .. } => {
+            Kind::Child { pidfd, registered, exited, options, .. } => {
                 if registered {
                     let _ = sys::epoll_ctl(self.epoll_fd, libc::EPOLL_CTL_DEL, pidfd, 0, 0);
+                }
+                // A child that exited is reaped after its callback, also
+                // when the callback removed the source (C frees it only
+                // after the dispatch).
+                if exited && options & libc::WNOWAIT == 0 {
+                    let _ = sys::waitid_pidfd(pidfd, libc::WNOHANG | libc::WEXITED);
                 }
                 sys::close(pidfd);
             }

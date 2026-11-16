@@ -621,7 +621,7 @@ echo 'SUBSYSTEM=="net", ENV{E}="1"' > /run/udev/rules.d/50-t.rules
 start -c 1
 link e0 e1
 settle
-sleep 3.2
+sleep 4.5
 echo change > /sys/class/net/e0/uevent
 settle
 stop

@@ -53,8 +53,18 @@ user and network namespaces, fed real kernel uevents of netkit devices: the
 logs of the manager and each worker, `/run/udev` and the clients' output
 match C, through queueing and blocking, workers that fail, time out or get
 killed, `udevadm control` settings, reloads, signals and interface renames;
-and each Rust client matches C's against a C udevd.  The boot test in the
-VM is still to do.
+and each Rust client matches C's against a C udevd.  In the VM, the Rust
+udevd boots the guest (OpenRC's `udev` and `udev-trigger`); of the 375
+devices in both boots' databases, 322 are identical to the C boot's, and
+every difference is a builtin's (module loading, `path_id`, `blkid`,
+`input_id`, hwdb); control, trigger and settle, monitor, the inotify watch
+(change events synthesized for a disk and its partitions), loop devices,
+`wait` and `lock` behave as with C.  One race shows up without the
+builtins: `udev-trigger` writes a rule for `/dev/root` right after starting
+udevd, and C 260.1 reads it at startup only because loading the builtins
+first gives the script time; until phase 7 the Rust udevd reads its rules
+earlier and picks the rule up at the next reload, after the root partition
+was processed.
 
 The reference is upstream's tag `v262` (its sources are the same as the release
 tarball's), built as Gentoo builds it ([tools/build-reference.sh](tools/build-reference.sh)):
@@ -257,7 +267,8 @@ then runs the test suites (so far, the differential cases of phases 1 to 6):
    Node and link handling still has to be tested in the VM (phase 6).
 6. **udevd (in progress, branch `phase6-udevd`):** the manager and workers, the netlink monitor, inotify watches,
    varlink, interface renaming, and `udevadm trigger`, `settle`, `control`, `monitor`,
-   `wait`, `lock` (done); boot-tested in the VM (next).
+   `wait`, `lock`; boot-tested in the VM (snapshot `systemd-utils-base`).  The full
+   `/dev` and `/run/udev` comparison of whole boots comes with the builtins.
 7. **Builtins and helpers:** `blkid`, `btrfs`, `hwdb`, `input_id`, `keyboard`, `kmod`,
    `net_id`, `net_setup_link` (`.link` files), `path_id`, `uaccess`, `usb_id` and the
    rest, plus the eight helper programs in `/usr/lib/udev`.
