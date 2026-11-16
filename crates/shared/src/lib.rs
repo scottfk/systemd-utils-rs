@@ -4,6 +4,7 @@
 //! the C file it ports; each function names the C function.
 
 pub mod argv;
+pub mod arphrd_names;
 pub mod blockdev;
 pub mod btrfs;
 pub mod build;
@@ -17,6 +18,7 @@ pub mod condition;
 pub mod conf_files;
 pub mod conf_parser;
 pub mod copy;
+pub mod cpu_set;
 pub mod creds;
 pub mod device_enumerator;
 pub mod device_filter;
@@ -28,6 +30,7 @@ pub mod errno;
 pub mod escape;
 pub mod ether_addr;
 pub mod ethtool;
+pub mod ethtool_link_modes;
 pub mod event;
 pub mod extract;
 pub mod factory_reset;
@@ -44,6 +47,8 @@ pub mod locale;
 pub mod log;
 pub mod main_func;
 pub mod netif_naming_scheme;
+pub mod netif_sriov;
+pub mod netif_util;
 pub mod netlink;
 pub mod notify;
 pub mod options;
