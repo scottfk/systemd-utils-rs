@@ -68,6 +68,7 @@ stop() {
 settle() { "$U" settle -t 20; echo "settle=$?"; }
 info() { "$U" info "$@" | grep -v '^E: USEC_INITIALIZED='; }
 link() { ip link add "$1" type netkit peer name "$2"; }
+link2() { ip link add "$1" type netkit mode l2 peer name "$2"; }
 quiet() { sleep 0.4; }
 "#;
 
@@ -592,6 +593,156 @@ settle
 ip -br link | awk '{print $1}' | sort
 info /sys/class/net/renamed0
 info /sys/class/net/r1
+stop
+"#,
+    );
+}
+
+#[test]
+fn link_files() {
+    // .link files on L2 netkit devices: matching, names and alternative
+    // names, MAC address policies, rtnetlink settings, udev properties,
+    // drop-ins, conditions, and the parser's warnings.
+    check(
+        "link_files",
+        r#"
+mount -t tmpfs tmpfs /usr/lib/systemd/network
+mkdir -p /run/systemd/network/10-name.link.d
+cat > /run/udev/rules.d/80-net.rules <<'EOF'
+SUBSYSTEM!="net", GOTO="end"
+ACTION=="remove", GOTO="end"
+IMPORT{builtin}="net_driver"
+IMPORT{builtin}="net_id"
+IMPORT{builtin}="net_setup_link"
+NAME=="", ENV{ID_NET_NAME}!="", NAME="$env{ID_NET_NAME}"
+LABEL="end"
+EOF
+cat > /run/systemd/network/10-name.link <<'EOF'
+[Match]
+OriginalName=n0
+[Link]
+Description=renamed by Name=
+Name=named0
+AlternativeName=alt-n0 alt-n0 bad/name
+MACAddressPolicy=none
+MACAddress=02:11:22:33:44:55
+MTUBytes=1400
+TransmitQueueLength=500
+Alias=hello alias
+Property=FOO=bar "BAZ=a b" FOO=again DEVPATH=x
+ImportProperty=ID_NET_DRIVER
+UnsetProperty=ID_NET_NAMING_SCHEME
+EOF
+cat > /run/systemd/network/10-name.link.d/50-more.conf <<'EOF'
+[Link]
+TransmitQueueLength=600
+EOF
+cat > /run/systemd/network/20-persistent.link <<'EOF'
+[Match]
+OriginalName=p*
+Driver=netkit
+Property=ID_NET_DRIVER=netkit
+[Link]
+NamePolicy=keep kernel mac path
+AlternativeNamesPolicy=mac path
+MACAddressPolicy=persistent
+EOF
+cat > /run/systemd/network/30-random.link <<'EOF'
+[Match]
+OriginalName=r0
+Type=ether
+[Link]
+MACAddressPolicy=random
+Name=rnd0
+EOF
+cat > /run/systemd/network/40-nomatch.link <<'EOF'
+[Match]
+Host=no-such-host
+Virtualization=!container
+Architecture=no-such-arch
+[Link]
+Name=never
+EOF
+cat > /run/systemd/network/50-warnings.link <<'EOF'
+Outside=1
+[Match]
+OriginalName=!x0 bad/name
+MACAddress=00:11:22:33:44:55 nonsense 0011.2233.4455
+PermanentMACAddress=
+Property=NOEQUALS
+KernelCommandLine=
+[Nosuch]
+Key=1
+[Link]
+NoSuchKey=1
+X-Extension=1
+Name=way-too-long-interface-name
+MTUBytes=1x
+BitsPerSecond=10G
+Duplex=sideways
+AutoNegotiation=maybe
+Advertise=10baset-full nosuchmode
+Port=tp
+MDI=crossover
+WakeOnLan=magic nosuch phy
+WakeOnLanPassword=00:11:22:33:44
+RxChannels=max
+TxChannels=0
+OtherChannels=x
+RxBufferSize=1024
+RxCoalesceSec=1s
+StatisticsBlockCoalesceSec=0
+TxMaxCoalescedFrames=abc
+NamePolicy=mac mac kernel nosuch
+AlternativeNamesPolicy=kernel path
+TransmitQueues=0
+ReceiveQueues=16385
+GenericSegmentOffloadMaxBytes=64K
+GenericSegmentOffloadMaxSegments=lots
+UDPSegmentationOffload=yes
+ReceiveChecksumOffload=yes
+IRQAffinityPolicy=nosuch
+IRQAffinity=0-1 3-2 x
+IRQAffinityNUMA=local
+ReceivePacketSteeringCPUMask=all
+SR-IOVVirtualFunctions=2
+Alias=caf\xc3\xa9
+[SR-IOV]
+VirtualFunction=0
+VLANId=5000
+[SR-IOV]
+VirtualFunction=1
+Trust=sure
+[SR-IOV]
+VLANId=3
+[SR-IOV]
+VirtualFunction=7
+[SR-IOV]
+VirtualFunction=1
+MACSpoofCheck=yes
+LinkState=auto
+[EnergyEfficientEthernet]
+Enable=yes
+TxLowPowerIdleSec=1d
+LinkMode=nosuch
+EOF
+: > /run/systemd/network/60-empty.link
+cat > /run/systemd/network/70-nomatch-section.link <<'EOF'
+[Link]
+Name=nope
+EOF
+start -c 1
+"$U" control -s
+link2 n0 n1
+link2 p0 p1
+link2 r0 r1
+quiet
+"$U" control -S
+settle
+ip -br link | awk '{print $1}' | sort
+ip -d link show named0 | grep -o 'mtu [0-9]*\|qlen [0-9]*\|link/ether [0-9a-f:]*\|altname [a-z0-9-]*\|alias .*' | sort
+info /sys/class/net/named0
+info /sys/class/net/p0
 stop
 "#,
     );
