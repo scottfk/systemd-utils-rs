@@ -498,3 +498,38 @@ pub fn stats_by_path_equal(a: &StatsByPath, b: &StatsByPath) -> bool {
     a.len() == b.len()
         && a.iter().all(|(p, sa)| b.get(p).is_some_and(|sb| crate::stat_util::stat_inode_unmodified(sa, sb)))
 }
+
+/// `config_parse(unit=NULL, filename, f=NULL, sections, ...)`: opens the
+/// file itself; a missing file is logged at debug level and is no error.
+pub fn config_parse_path(filename: &[u8], sections: Option<&[&str]>, flags: u32, lookup: &mut SectionLookup) -> i32 {
+    let mut f = match crate::fileio::fopen_re(filename) {
+        Ok(f) => f,
+        Err(r) => {
+            if flags & CONFIG_PARSE_WARN != 0 || r == -libc::ENOENT {
+                log_full_errno!(
+                    if r == -libc::ENOENT { LOG_DEBUG } else { LOG_ERR },
+                    r,
+                    "Failed to open configuration file '",
+                    filename,
+                    "': ",
+                    strerror(r)
+                );
+            }
+            return if r == -libc::ENOENT { 0 } else { r };
+        }
+    };
+    let st = match sys::fstat(f.fd()) {
+        Ok(st) => st,
+        Err(r) => {
+            return log_full_errno!(
+                if flags & CONFIG_PARSE_WARN != 0 { LOG_ERR } else { LOG_DEBUG },
+                r,
+                "Failed to fstat(",
+                filename,
+                "): ",
+                strerror(r)
+            );
+        }
+    };
+    config_parse_sections(filename, &mut f, &st, sections, flags, lookup)
+}

@@ -16,6 +16,14 @@ name = "fido_id"
 path = "src/bin/fido_id.rs"
 
 [[bin]]
+name = "iocost"
+path = "src/bin/iocost.rs"
+
+[[bin]]
+name = "mtd_probe"
+path = "src/bin/mtd_probe.rs"
+
+[[bin]]
 name = "v4l_id"
 path = "src/bin/v4l_id.rs"
 

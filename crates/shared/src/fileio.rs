@@ -338,6 +338,7 @@ pub const WRITE_STRING_FILE_MKDIR_0755: u32 = 1 << 9;
 pub const WRITE_STRING_FILE_MODE_0600: u32 = 1 << 10;
 pub const WRITE_STRING_FILE_MODE_0444: u32 = 1 << 11;
 pub const WRITE_STRING_FILE_SUPPRESS_REDUNDANT_VIRTUAL: u32 = 1 << 12;
+pub const WRITE_STRING_FILE_OPEN_NONBLOCKING: u32 = 1 << 14;
 
 /// `write_string_stream_full(f, line, flags, NULL)` on an fd.
 fn write_string_stream(fd: i32, line: &[u8], flags: u32) -> Result<(), i32> {
@@ -387,6 +388,9 @@ pub fn write_string_file(path: &[u8], line: &[u8], flags: u32) -> Result<(), i32
     }
     if flags & WRITE_STRING_FILE_TRUNCATE != 0 {
         oflags |= libc::O_TRUNC;
+    }
+    if flags & WRITE_STRING_FILE_OPEN_NONBLOCKING != 0 {
+        oflags |= libc::O_NONBLOCK;
     }
     oflags |= if flags & WRITE_STRING_FILE_SUPPRESS_REDUNDANT_VIRTUAL != 0 { libc::O_RDWR } else { libc::O_WRONLY };
     let mode = if flags & WRITE_STRING_FILE_MODE_0600 != 0 {
