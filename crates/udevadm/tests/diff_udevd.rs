@@ -114,28 +114,12 @@ fn run(daemon: &PathBuf, label: &str, name: &str, script: &str, env: &[(&str, &s
     s
 }
 
-/// The lines of builtins and helpers not ported before phase 7.
+/// Lines that depend on the sandbox rather than the program: the process
+/// title (which depends on the environment's size) and the container
+/// detection.
 fn is_masked(line: &str) -> bool {
-    const PREFIXES: &[&str] = &[
-        "Trying to open \"",
-        "=== trie on-disk ===",
-        "tool version:",
-        "file size:",
-        "header size",
-        "strings ",
-        "nodes ",
-        "Loaded hardware database.",
-        "Loaded kernel module index.",
-        "Using default interface naming scheme",
-        "Parsed configuration file \"",
-        "Loaded link configuration context.",
-        "Unloaded hardware database.",
-        "Unloaded kernel module index.",
-        "Unloaded link configuration context.",
-        "PR_SET_MM_ARG_START failed",
-        "Failed to read $container of PID 1",
-        "Found container virtualization",
-    ];
+    const PREFIXES: &[&str] =
+        &["PR_SET_MM_ARG_START failed", "Failed to read $container of PID 1", "Found container virtualization"];
     PREFIXES.iter().any(|p| line.starts_with(p))
 }
 

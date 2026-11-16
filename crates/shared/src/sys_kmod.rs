@@ -88,6 +88,11 @@ fn lib(log_level: i32) -> Result<&'static Lib, i32> {
     r.as_ref().map_err(|e| *e)
 }
 
+/// `dlopen_libkmod(log_level)`: only the first call logs, as in C.
+pub fn dlopen_libkmod(log_level: i32) -> Result<(), i32> {
+    lib(log_level).map(|_| ())
+}
+
 unsafe extern "C" {
     #[link_name = "vsnprintf"]
     fn vsnprintf_raw(buf: *mut c_char, size: usize, format: *const c_char, ap: *mut c_void) -> c_int;

@@ -209,32 +209,15 @@ impl Json {
     }
 }
 
-/// Mask what is the same by design but can't match yet: the builtins'
-/// init and exit logging (the builtins are phase 7), and initialization
-/// timestamps taken from `CLOCK_MONOTONIC`.
+/// Mask what is the same by design but can't match: initialization
+/// timestamps taken from `CLOCK_MONOTONIC`, and a few racy lines.
 fn mask(s: &str) -> String {
     let mut out = String::new();
-    let mut in_builtins = false;
     for l in s.split_inclusive('\n') {
         let t = l.trim_end_matches(['\n', '\r']);
-        if t.ends_with("Loading builtins...") {
-            in_builtins = true;
-            out.push_str(l);
-            continue;
-        }
-        if t.ends_with("Loading builtins done.") {
-            in_builtins = false;
-        }
         // CPUID leaf 1 carries the APIC ID of the CPU we happen to run on.
         // The forked child's own log line races with the parent's.
-        if in_builtins
-            || t.starts_with("PR_SET_MM_ARG_START failed")
-            || t.starts_with("CPUID result ")
-            || is_set_element_trace(t)
-            || t.ends_with("Unloaded hardware database.")
-            || t.ends_with("Unloaded kernel module index.")
-            || t.ends_with("Unloaded link configuration context.")
-        {
+        if t.starts_with("PR_SET_MM_ARG_START failed") || t.starts_with("CPUID result ") || is_set_element_trace(t) {
             continue;
         }
         out.push_str(&mask_usec(l));

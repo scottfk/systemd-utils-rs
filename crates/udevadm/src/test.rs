@@ -108,8 +108,10 @@ pub fn verb_test_main(argv: Vec<Vec<u8>>) -> i32 {
     let rules = match crate::udev::rules::udev_rules_load(timing, &extra_rules_dir) {
         Ok(r) => r,
         Err(r) => {
+            // C's cleanup runs the exit hooks after the error is logged.
+            let r = log_error_errno!(r, "Failed to read udev rules: ", strerror(r));
             crate::udev::builtin::udev_builtin_exit();
-            return log_error_errno!(r, "Failed to read udev rules: ", strerror(r));
+            return r;
         }
     };
     log_info!("Loading udev rules files done.");
@@ -117,8 +119,9 @@ pub fn verb_test_main(argv: Vec<Vec<u8>>) -> i32 {
     let dev = match crate::util::find_device_with_action(&syspath, action) {
         Ok(d) => d,
         Err(r) => {
+            let r = log_error_errno!(r, "Failed to open device '", &syspath, "': ", strerror(r));
             crate::udev::builtin::udev_builtin_exit();
-            return log_error_errno!(r, "Failed to open device '", &syspath, "': ", strerror(r));
+            return r;
         }
     };
     // Don't read info from the db.
