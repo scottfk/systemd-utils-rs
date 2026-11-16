@@ -9,6 +9,7 @@ use crate::{errno::strerror, log_debug_errno};
 
 pub const BTRFS_SUPER_MAGIC: i64 = 0x9123683e;
 pub const OVERLAYFS_SUPER_MAGIC: i64 = 0x794c7630;
+pub const PROC_SUPER_MAGIC: i64 = 0x9fa0;
 pub const TMPFS_MAGIC: i64 = 0x01021994;
 pub const RAMFS_MAGIC: i64 = 0x858458f6;
 pub const CGROUP2_SUPER_MAGIC: i64 = 0x63677270;

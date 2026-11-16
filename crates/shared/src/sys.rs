@@ -2415,3 +2415,14 @@ pub fn inet_pton(family: c_int, s: &[u8]) -> Option<Vec<u8>> {
     }
     Some(buf[..if family == libc::AF_INET { 4 } else { 16 }].to_vec())
 }
+
+unsafe extern "C" {
+    #[link_name = "gnu_get_libc_version"]
+    fn gnu_get_libc_version_raw() -> *const c_char;
+}
+
+/// `gnu_get_libc_version()`.
+pub fn gnu_get_libc_version() -> Vec<u8> {
+    // SAFETY: glibc returns a static NUL-terminated string.
+    unsafe { CStr::from_ptr(gnu_get_libc_version_raw()) }.to_bytes().to_vec()
+}

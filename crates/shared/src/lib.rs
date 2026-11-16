@@ -13,6 +13,7 @@ pub mod cgroup;
 pub mod chase;
 pub mod chattr;
 pub mod common_signal;
+pub mod condition;
 pub mod conf_files;
 pub mod conf_parser;
 pub mod copy;

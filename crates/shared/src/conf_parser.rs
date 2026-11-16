@@ -68,15 +68,38 @@ pub fn log_syntax_parse_error(file: &[u8], line: u32, error: i32, lvalue: &[u8],
     0
 }
 
-/// `parse_line()` with `sections=NULL`.  `section` is the current
-/// section, if the file has a header anyway.
+/// One assignment, as a section-aware lookup sees it.
+#[derive(Debug)]
+pub struct Assign<'a> {
+    pub filename: &'a [u8],
+    pub line: u32,
+    pub section: Option<&'a [u8]>,
+    pub section_line: u32,
+    pub lvalue: &'a [u8],
+    pub rvalue: &'a [u8],
+}
+
+/// A table lookup for files with sections: `None` for an unknown key.
+pub type SectionLookup<'a> = dyn FnMut(&Assign) -> Option<i32> + 'a;
+
+/// What `parse_line()` keeps between lines.
+#[derive(Debug, Default)]
+struct SectionState {
+    section: Option<Vec<u8>>,
+    section_line: u32,
+    section_ignored: bool,
+}
+
+/// `parse_line()`.  `sections` is the nulstr of known sections (None:
+/// any section, and assignments outside of one).
 fn parse_line(
     filename: &[u8],
     line: u32,
+    sections: Option<&[&str]>,
     flags: u32,
-    section: &mut Option<Vec<u8>>,
+    st: &mut SectionState,
     l: &[u8],
-    lookup: &mut Lookup,
+    lookup: &mut SectionLookup,
 ) -> i32 {
     let l = strstrip(l);
     if l.is_empty() || l[0] == b'\n' {
@@ -117,7 +140,29 @@ fn parse_line(
                 "'"
             );
         }
-        *section = Some(n.to_vec());
+        if let Some(secs) = sections
+            && !secs.iter().any(|t| t.as_bytes() == n)
+        {
+            let ignore = flags & CONFIG_PARSE_RELAXED != 0
+                || n.starts_with(b"X-")
+                || secs.iter().any(|t| t.strip_prefix('-').is_some_and(|t| t.as_bytes() == n));
+            if !ignore {
+                log_syntax!(LOG_WARNING, Some(filename), line, 0, "Unknown section '", n, "'. Ignoring.");
+            }
+            st.section = None;
+            st.section_line = 0;
+            st.section_ignored = true;
+        } else {
+            st.section = Some(n.to_vec());
+            st.section_line = line;
+            st.section_ignored = false;
+        }
+        return 0;
+    }
+    if sections.is_some() && st.section.is_none() {
+        if flags & CONFIG_PARSE_RELAXED == 0 && !st.section_ignored {
+            log_syntax!(LOG_WARNING, Some(filename), line, 0, "Assignment outside of section. Ignoring.");
+        }
         return 0;
     }
     let Some(e) = l.iter().position(|&b| b == b'=') else {
@@ -129,11 +174,12 @@ fn parse_line(
     let lvalue = strstrip(&l[..e]);
     let rvalue = strstrip(&l[e + 1..]);
     // next_assignment()
-    match lookup(filename, line, section.as_deref(), lvalue, rvalue) {
+    let a = Assign { filename, line, section: st.section.as_deref(), section_line: st.section_line, lvalue, rvalue };
+    match lookup(&a) {
         Some(r) => r,
         None => {
             if flags & CONFIG_PARSE_RELAXED == 0 && !lvalue.starts_with(b"X-") {
-                let sec = section.as_deref();
+                let sec = st.section.as_deref();
                 log_syntax!(
                     LOG_WARNING,
                     Some(filename),
@@ -155,8 +201,21 @@ fn parse_line(
 
 /// `config_parse(unit=NULL, filename, f, sections=NULL, ...)`.
 fn config_parse(filename: &[u8], f: &mut CReader, st: &sys::Stat, flags: u32, lookup: &mut Lookup) -> i32 {
+    let mut l = |a: &Assign| lookup(a.filename, a.line, a.section, a.lvalue, a.rvalue);
+    config_parse_sections(filename, f, st, None, flags, &mut l)
+}
+
+/// `config_parse(unit=NULL, filename, f, sections, ...)` on an open file.
+pub fn config_parse_sections(
+    filename: &[u8],
+    f: &mut CReader,
+    st: &sys::Stat,
+    sections: Option<&[&str]>,
+    flags: u32,
+    lookup: &mut SectionLookup,
+) -> i32 {
     stat_warn_permissions(filename, st);
-    let mut section: Option<Vec<u8>> = None;
+    let mut state = SectionState::default();
     let mut continuation: Option<Vec<u8>> = None;
     let mut line = 0u32;
     let mut bom_seen = false;
@@ -234,7 +293,7 @@ fn config_parse(filename: &[u8], f: &mut CReader, st: &sys::Stat, flags: u32, lo
             continue;
         }
         let p = p.to_vec();
-        let r = parse_line(filename, line, flags, &mut section, &p, lookup);
+        let r = parse_line(filename, line, sections, flags, &mut state, &p, lookup);
         if r < 0 {
             return fail(r, line);
         }
@@ -242,7 +301,7 @@ fn config_parse(filename: &[u8], f: &mut CReader, st: &sys::Stat, flags: u32, lo
     }
     if let Some(c) = continuation {
         line += 1;
-        let r = parse_line(filename, line, flags, &mut section, &c, lookup);
+        let r = parse_line(filename, line, sections, flags, &mut state, &c, lookup);
         if r < 0 {
             return fail(r, line);
         }
@@ -250,7 +309,7 @@ fn config_parse(filename: &[u8], f: &mut CReader, st: &sys::Stat, flags: u32, lo
     1
 }
 
-fn open_regular(path: &[u8]) -> Result<(CReader, sys::Stat), i32> {
+pub fn open_regular(path: &[u8]) -> Result<(CReader, sys::Stat), i32> {
     let c = chase(path, None, CHASE_MUST_BE_REGULAR, false, true)?;
     let fd: OwnedFd = c.fd.expect("requested");
     let path = crate::fd::proc_fd_path(fd.raw());
@@ -324,4 +383,118 @@ pub fn config_parse_log_level(filename: &[u8], line: u32, lvalue: &[u8], rvalue:
             1
         }
     }
+}
+
+/// `stats_by_path`: the files read, and their stat data.
+pub type StatsByPath = std::collections::HashMap<Vec<u8>, sys::Stat>;
+
+/// `conf_files_list_dropins(&ret, dropin_dirname, NULL, ..., flags, dirs)`.
+pub fn conf_files_list_dropins(dropin_dirname: &[u8], flags: u32, dirs: &[&[u8]]) -> Result<Vec<Vec<u8>>, i32> {
+    let dropin_dirs: Vec<Vec<u8>> = dirs.iter().map(|d| bcat!(*d, "/", dropin_dirname)).collect();
+    crate::conf_files::conf_files_list_strv(Some(b".conf"), None, flags, &dropin_dirs)
+}
+
+/// `config_parse_many_full(conf_files, conf_file_dirs, dropin_dirname,
+/// NULL, ..., sections, ...)`: the stats of the files read (if asked for)
+/// and the drop-ins.
+pub fn config_parse_many_full(
+    conf_files: &[&[u8]],
+    conf_file_dirs: &[&[u8]],
+    dropin_dirname: &[u8],
+    sections: Option<&[&str]>,
+    flags: u32,
+    lookup: &mut SectionLookup,
+    want_stats: bool,
+) -> Result<(StatsByPath, Vec<Vec<u8>>), i32> {
+    let level = if flags & CONFIG_PARSE_WARN != 0 { LOG_WARNING } else { LOG_DEBUG };
+    let files = conf_files_list_dropins(
+        dropin_dirname,
+        if flags & CONFIG_PARSE_WARN != 0 { crate::conf_files::CONF_FILES_WARN } else { 0 },
+        conf_file_dirs,
+    )
+    .map_err(|r| log_full_errno!(level, r, "Failed to list drop-ins in ", dropin_dirname, ": ", strerror(r)))?;
+    // config_parse_many_files(): pin and stat() all drop-ins.
+    let mut stats = StatsByPath::new();
+    let mut dropins: Vec<(Vec<u8>, CReader, sys::Stat)> = Vec::new();
+    for f in &files {
+        match open_regular(f) {
+            Err(r) if r == -libc::ENOENT => continue,
+            Err(r) => return Err(log_full_errno!(level, r, "Failed to open ", &f[..], ": ", strerror(r))),
+            Ok((rd, st)) => dropins.push((f.clone(), rd, st)),
+        }
+    }
+    for f in conf_files {
+        let (mut rd, st) = match open_regular(f) {
+            Err(r) if r == -libc::ENOENT => continue,
+            Err(r) => return Err(log_full_errno!(level, r, "Failed to open ", *f, ": ", strerror(r))),
+            Ok(x) => x,
+        };
+        if !dropins.is_empty() && dropins.iter().any(|(_, _, s)| s.st_dev == st.st_dev && s.st_ino == st.st_ino) {
+            crate::log_debug!(*f, ": symlink to/symlinked as drop-in, will be read later.");
+            break;
+        }
+        let r = config_parse_sections(f, &mut rd, &st, sections, flags, lookup);
+        if r < 0 {
+            return Err(r);
+        }
+        if want_stats {
+            stats.insert(f.to_vec(), st);
+        }
+        break;
+    }
+    for (p, mut rd, st) in dropins {
+        let r = config_parse_sections(&p, &mut rd, &st, sections, flags, lookup);
+        if r < 0 {
+            return Err(r);
+        }
+        if want_stats {
+            stats.insert(p, st);
+        }
+    }
+    Ok((stats, files))
+}
+
+/// `config_get_stats_by_path(suffix, NULL, flags, dirs, check_dropins, &ret)`.
+pub fn config_get_stats_by_path(
+    suffix: &[u8],
+    flags: u32,
+    dirs: &[&[u8]],
+    check_dropins: bool,
+) -> Result<StatsByPath, i32> {
+    let dirs_v: Vec<Vec<u8>> = dirs.iter().map(|d| d.to_vec()).collect();
+    let files = crate::conf_files::conf_files_list_strv(Some(suffix), None, flags, &dirs_v)?;
+    let mut out = StatsByPath::new();
+    for f in &files {
+        let st = match sys::stat(f) {
+            Err(r) if r == -libc::ENOENT => continue,
+            Err(r) => return Err(r),
+            Ok(st) => st,
+        };
+        if crate::stat_util::null_or_empty(&st) {
+            continue;
+        }
+        out.insert(f.clone(), st);
+        if !check_dropins {
+            continue;
+        }
+        // dropins_get_stats_by_path()
+        let base = crate::path::path_extract_filename(f)?;
+        let dropin_dirname = bcat!(&base[..], ".d");
+        for d in conf_files_list_dropins(&dropin_dirname, 0, dirs)? {
+            match sys::stat(&d) {
+                Err(r) if r == -libc::ENOENT => continue,
+                Err(r) => return Err(r),
+                Ok(st) => {
+                    out.insert(d, st);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// `stats_by_path_equal(a, b)`.
+pub fn stats_by_path_equal(a: &StatsByPath, b: &StatsByPath) -> bool {
+    a.len() == b.len()
+        && a.iter().all(|(p, sa)| b.get(p).is_some_and(|sb| crate::stat_util::stat_inode_unmodified(sa, sb)))
 }
