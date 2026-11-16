@@ -11,6 +11,7 @@ mod keyboard_keys;
 pub mod kmod;
 pub mod net_driver;
 pub mod net_id;
+pub mod net_setup_link;
 pub mod path_id;
 pub mod uaccess;
 pub mod usb_id;

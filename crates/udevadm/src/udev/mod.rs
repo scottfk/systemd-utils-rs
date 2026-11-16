@@ -7,6 +7,7 @@ pub mod def;
 pub mod dump;
 pub mod event;
 pub mod format;
+pub mod net;
 pub mod node;
 pub mod rules;
 pub mod spawn;

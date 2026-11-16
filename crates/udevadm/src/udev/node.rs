@@ -676,7 +676,7 @@ pub fn udev_node_apply_permissions(
 
 /// `xescape(s, bad)`: `\xNN` for control characters, bytes >= 127,
 /// backslashes and the bytes in `bad`.
-fn xescape(s: &[u8], bad: &[u8]) -> Vec<u8> {
+pub(crate) fn xescape(s: &[u8], bad: &[u8]) -> Vec<u8> {
     let hex = b"0123456789abcdef";
     let mut out = Vec::with_capacity(s.len());
     for &c in s {

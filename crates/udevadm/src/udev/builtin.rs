@@ -99,6 +99,12 @@ fn hooks() -> Vec<Hooks> {
             should_reload: Some(b::kmod::should_reload),
         },
         Hooks { cmd: BuiltinCommand::NetId, init: Some(b::net_id::init), exit: None, should_reload: None },
+        Hooks {
+            cmd: BuiltinCommand::NetLink,
+            init: Some(b::net_setup_link::init),
+            exit: Some(b::net_setup_link::exit),
+            should_reload: Some(b::net_setup_link::should_reload),
+        },
     ]
 }
 
@@ -204,6 +210,7 @@ pub fn udev_builtin_run(event: &mut Event, cmd: BuiltinCommand, command: &[u8]) 
         BuiltinCommand::Kmod => b::kmod::run(event, &argv),
         BuiltinCommand::NetDriver => b::net_driver::run(event, &argv),
         BuiltinCommand::NetId => b::net_id::run(event, &argv),
+        BuiltinCommand::NetLink => b::net_setup_link::run(event, &argv),
         BuiltinCommand::UsbId => b::usb_id::run(event, &argv),
         BuiltinCommand::PathId => b::path_id::run(event, &argv),
         BuiltinCommand::Uaccess => b::uaccess::run(event, &argv),
@@ -215,6 +222,28 @@ pub fn udev_builtin_run(event: &mut Event, cmd: BuiltinCommand, command: &[u8]) 
 }
 
 /// `udev_builtin_add_property(event, key, val)`.
+/// `udev_builtin_import_property(event, key)`: copies the property from
+/// the database clone; Ok(true) if it was there.
+pub fn udev_builtin_import_property(event: &Event, key: &[u8]) -> Result<bool, i32> {
+    let Some(db) = event.dev_db_clone.clone() else { return Ok(false) };
+    let val = match db.get_property_value(key) {
+        Err(r) if r == -libc::ENOENT => return Ok(false),
+        Err(r) => {
+            return Err(log_device_debug_errno!(
+                db,
+                r,
+                "Failed to get property \"",
+                key,
+                "\", ignoring: ",
+                strerror(r)
+            ));
+        }
+        Ok(v) => v.bytes().to_vec(),
+    };
+    udev_builtin_add_property(event, key, Some(&val))?;
+    Ok(true)
+}
+
 pub fn udev_builtin_add_property(event: &Event, key: &[u8], val: Option<&[u8]>) -> Result<(), i32> {
     let val = val.filter(|v| !v.is_empty());
     if let Err(r) = event.dev.add_property(key, val) {
