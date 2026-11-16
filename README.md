@@ -26,9 +26,11 @@ A drop-in port/reimplementation of Gentoo's systemd-utils (udev, libudev, hwdb, 
 
 ## Status
 
-Phases 1 and 2 are done: `systemd-sysctl` and `systemd-tmpfiles` are ported,
-along with the shared code the later phases build on (see the layout below).
-330 sysctl and 893 tmpfiles differential cases match the C build.
+Phases 1 to 3 are done: `systemd-sysctl`, `systemd-tmpfiles` and
+`systemd-hwdb` are ported, along with the shared code the later phases build
+on (see the layout below). 330 sysctl, 893 tmpfiles and 187 hwdb differential
+cases match the C build, and compiling the installed `hwdb.d` gives a
+`hwdb.bin` byte-identical to the C build's (and to the one installed).
 
 The reference is upstream's tag `v262` (its sources are the same as the release
 tarball's), built as Gentoo builds it ([tools/build-reference.sh](tools/build-reference.sh)):
@@ -49,6 +51,7 @@ same 12 programs, the same exported libudev symbols on both ABIs (92 functions i
 | `crates/shared` | ports of the `src/basic`, `src/shared` and `src/libsystemd` code the programs use, one module per C file: logging (`log.c`), the 262 option parser and `--help` tables (`options.c`, `verbs.c`, `format-table.c`), `--introspect-cli` JSON (`sd-json.c`), the pager, conf-files and `--cat-config`, `chase.c`, `fileio.c`, path and string helpers; for tmpfiles also specifiers, `sd-path`, ACLs (`acl-util.c`, libacl `dlopen()`ed), xattrs, `chattr`, btrfs subvolumes and qgroups, `rm-rf.c`, `copy.c`, capabilities and credentials.  All `unsafe` is in `sys.rs` (and the libacl calls in `sys_acl.rs`). |
 | `crates/sysctl` | `systemd-sysctl` (`src/sysctl/sysctl.c`) |
 | `crates/tmpfiles` | `systemd-tmpfiles` (`src/tmpfiles/tmpfiles.c`, `offline-passwd.c`) |
+| `crates/hwdb` | `systemd-hwdb` (`src/hwdb/hwdb.c`); the compiler and sd-hwdb are `shared::hwdb` (`hwdb-util.c`, `sd-hwdb.c`, `strbuf.c`), for udevadm and libudev later |
 | `tests/common` | the differential harness, shared by every crate's tests |
 | `tests/shim` | the LD_PRELOAD clock |
 | `tools` | the reference build |
@@ -78,6 +81,9 @@ isn't possible or isn't worth it:
   (merging, hard links, `user.*` xattrs, owners, modes and times), not all of
   `copy.c`; and `inode_same_at()` compares `fstat()` results where C compares
   file handles, which gives the same answers.
+- sd-hwdb reads `hwdb.bin` into memory where C maps it; and a lookup whose
+  pattern is longer than `LINE_MAX` (2048 bytes, far beyond any real hwdb
+  entry) stops matching where C's buffer arithmetic would go wrong.
 
 ## What gets ported
 
@@ -101,7 +107,7 @@ init scripts are installed unchanged.
 ## Testing
 
 `make check` builds the C reference into `../systemd` if it isn't there,
-then runs the test suites (so far, the differential cases of phases 1 and 2):
+then runs the test suites (so far, the differential cases of phases 1 to 3):
 
 1. **Differential tests.** Each case runs the C program and the port on copies of the
    same tree, and compares the exit status, stdout, stderr, what was logged, and every
@@ -120,6 +126,10 @@ then runs the test suites (so far, the differential cases of phases 1 and 2):
      map, and `CHASE_SAFE` refuses that transition. They also compare xattrs, ACLs,
      file capabilities, `lsattr` flags, link counts and timestamps, and hydra's btrfs
      root means `v`, `q` and `Q` lines make real subvolumes.
+   - Binary files (such as `hwdb.bin`) are compared by size and SHA-256. A case can
+     also run a shell script in which the program's name runs the implementation
+     under test, e.g. `systemd-hwdb update && systemd-hwdb query …`, so each
+     build reads what it wrote.
    - `SYSTEMD_DIFF_SHOW=1 cargo test -- --nocapture` prints each case's outcome.
    - udev cases run on a fake sysfs (as upstream's own udev tests do) with a private
      `/run/udev` and `/dev`, through `udevadm test`, `udevadm info` and the libudev API

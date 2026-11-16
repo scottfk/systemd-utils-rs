@@ -21,3 +21,11 @@ it's surprising and user-visible; **low** means it's cosmetic or hard to hit.
 |---|---|
 | low | While cleaning a directory (`dir_cleanup()`), the result is overwritten by every entry's `statx()`, so a failure to remove an earlier entry (logged as a warning) only makes the run fail if it happens on the last entry looked at. |
 | low | `btrfs_subvol_get_parent()` (used by `q` and `Q` lines when quotas are on) doesn't advance its search between rounds, so a tree search that returns items but no match would repeat forever. The kernel always returns the backref it looks for, so it doesn't happen in practice. |
+
+## systemd-hwdb
+
+| Severity | Quirk |
+|---|---|
+| medium | `--strict` doesn't make `update` fail on parse errors (malformed records and properties are only warnings); only a file that can't be read does. |
+| low | A `#` anywhere in a line starts a comment, also inside a property value: ` KEY=a#b` sets `KEY=a`. |
+| low | `query` is silent about a missing or unreadable database (exit status 1) and about a corrupt one (exit status 0, no properties). |

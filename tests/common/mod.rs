@@ -28,7 +28,9 @@
 //!
 //! The exit status, stdout, stderr (or, on a pty, the combined terminal
 //! output), the syslog and journal messages, and every file under `T`
-//! (type, mode, owner, contents), with `T` and pids normalized.  The
+//! (type, mode, owner, contents; binary files, which the snapshot's
+//! separators can't carry, by size and SHA-256), with `T` and pids
+//! normalized.  The
 //! snapshot and the cleanup run as root inside the sandbox, so files owned
 //! by other users are covered too.
 
@@ -126,6 +128,10 @@ pub struct Case {
     /// which the sandbox sees as nobody, and every path from "/" down to
     /// `T` has an unsafe nobody → root transition (CHASE_SAFE refuses it).
     pub own_root: bool,
+    /// Run this `sh -c` script instead of the program; in it, the
+    /// program's name runs the implementation under test (a symlink in
+    /// `T/.bin`, first on $PATH).  The case's args are then unused.
+    pub shell: Option<String>,
 }
 
 impl Case {
@@ -147,6 +153,7 @@ impl Case {
             meta: false,
             touch: Vec::new(),
             own_root: false,
+            shell: None,
         }
     }
 
@@ -256,6 +263,10 @@ impl Case {
     /// `/proc/sys/kernel` (`@T@` works too).
     pub fn meta(mut self) -> Case {
         self.meta = true;
+        self
+    }
+    pub fn shell(mut self, script: &str) -> Case {
+        self.shell = Some(script.to_string());
         self
     }
     pub fn own_root(mut self) -> Case {
@@ -728,7 +739,7 @@ fn snapshot(t: &Path, pid: u32, meta: bool) -> BTreeMap<String, String> {
     };
     let script = format!(
         "cd '{}' || exit 1
-         find . -mindepth 1 \\( -path ./.realetc -o -path ./.newroot -o -path ./devlog -o -path ./.faketime -o -path ./.stdin \
+         find . -mindepth 1 \\( -path ./.realetc -o -path ./.newroot -o -path ./.bin -o -path ./devlog -o -path ./.faketime -o -path ./.stdin \
             -o -path ./.stdout -o -path ./.stderr -o -path ./run/systemd/journal/socket \
             -o \\( -type l -path './etc/*' \\) \\) -prune -o -print | LC_ALL=C sort | while read -r f; do
            printf '\\001%s\\002%s' \"$f\" \"$(stat -c '%F %a %u:%g' \"$f\")\"
@@ -738,6 +749,8 @@ fn snapshot(t: &Path, pid: u32, meta: bool) -> BTreeMap<String, String> {
            fi
            printf '\\002'
            if [ -L \"$f\" ]; then readlink \"$f\"
+           elif [ -f \"$f\" ] && [ -n \"$(tr -dc '\\001\\002' < \"$f\" 2>/dev/null | head -c1)\" ]; then
+             printf 'binary %s bytes sha256 %s' \"$(stat -c %s \"$f\")\" \"$(sha256sum < \"$f\" | cut -d' ' -f1)\"
            elif [ -f \"$f\" ]; then cat \"$f\"
            fi
          done; exit 0",
@@ -922,6 +935,15 @@ pub fn run(case: &Case, prog: &Program, label: &str, bin: &Path) -> Outcome {
     }
     let mut argv = vec![cstr(prog.name)];
     argv.extend(case.args.iter().map(|a| cstr(subst(a))));
+    let mut exe = path_c(bin);
+    if let Some(script) = &case.shell {
+        std::fs::create_dir_all(t.join(".bin")).unwrap();
+        std::os::unix::fs::symlink(bin.canonicalize().unwrap(), t.join(".bin").join(prog.name)).unwrap();
+        argv = vec![cstr("sh"), cstr("-c"), cstr(subst(script))];
+        exe = cstr("/bin/sh");
+        envp.retain(|e| !e.as_bytes().starts_with(b"PATH="));
+        envp.push(cstr(format!("PATH={}/.bin:/usr/bin:/bin", fixed_root().display())));
+    }
 
     let pid = spawn_in_sandbox(Spawn {
         binds,
@@ -932,7 +954,7 @@ pub fn run(case: &Case, prog: &Program, label: &str, bin: &Path) -> Outcome {
         stdio,
         ctty: pty.is_some(),
         newroot: if case.own_root { Some(NewRoot::new(&t, bin)) } else { None },
-        exe: path_c(bin),
+        exe,
         argv,
         envp,
     });
