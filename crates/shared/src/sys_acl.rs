@@ -55,6 +55,11 @@ struct Lib {
 static LIB: OnceLock<Lib> = OnceLock::new();
 static DLOPEN_BLOCKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Whether `block_dlopen()` was called.
+pub fn dlopen_blocked() -> bool {
+    DLOPEN_BLOCKED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// `block_dlopen()`: forked children may not load new modules.
 pub fn block_dlopen() {
     DLOPEN_BLOCKED.store(true, std::sync::atomic::Ordering::Relaxed);

@@ -72,7 +72,7 @@ pub fn invoked_by_systemd() -> bool {
 }
 
 /// `proc_cmdline_strv_internal()`.
-fn proc_cmdline_strv() -> Result<Vec<Vec<u8>>, i32> {
+pub fn proc_cmdline_strv() -> Result<Vec<Vec<u8>>, i32> {
     let flags = EXTRACT_UNQUOTE | EXTRACT_RELAX | EXTRACT_RETAIN_ESCAPE;
     if let Some(e) = sys::secure_getenv("SYSTEMD_PROC_CMDLINE") {
         return strv_split_full(&e, None, flags);

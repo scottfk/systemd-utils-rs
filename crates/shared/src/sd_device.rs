@@ -2102,6 +2102,14 @@ impl Device {
             .map_err(|e| log_device_debug_errno!(self, e, "Failed to parse '", sysattr, "' attribute: ", strerror(e)))
     }
 
+    /// `device_get_sysattr_u16_full()`.
+    pub fn get_sysattr_u16_full(&self, sysattr: &[u8], base: u32) -> Result<u16, i32> {
+        let value = self.get_sysattr_value(sysattr)?;
+        safe_atou_full(value.bytes(), base)
+            .and_then(|v| u16::try_from(v).map_err(|_| -libc::ERANGE))
+            .map_err(|e| log_device_debug_errno!(self, e, "Failed to parse '", sysattr, "' attribute: ", strerror(e)))
+    }
+
     /// `device_get_sysattr_u64()`.
     pub fn get_sysattr_u64(&self, sysattr: &[u8]) -> Result<u64, i32> {
         let value = self.get_sysattr_value(sysattr)?;

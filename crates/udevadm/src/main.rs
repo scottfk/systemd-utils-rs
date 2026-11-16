@@ -13,11 +13,11 @@ mod cat;
 mod control;
 mod hwdb;
 mod info;
-mod later;
 mod lock;
 mod monitor;
 mod settle;
 mod test;
+mod test_builtin;
 mod trigger;
 mod udevd;
 mod verify;
@@ -66,7 +66,7 @@ pub const VERBS: &[Verb] = &[
     udevadm_verb("control", &[], VERB_OPTION_REQUIRED, "Control the udev daemon", control::OPTIONS, None),
     udevadm_verb("monitor", &[], 0, "Listen to kernel and udev events", monitor::OPTIONS, None),
     udevadm_verb("test", &["DEVPATH"], 0, "Test an event run", test::OPTIONS, None),
-    udevadm_verb("test-builtin", &["COMMAND DEVPATH"], 0, "Test a built-in command", later::TEST_BUILTIN, None),
+    udevadm_verb("test-builtin", &["COMMAND DEVPATH"], 0, "Test a built-in command", test_builtin::OPTIONS, None),
     udevadm_verb("verify", &["[FILE\u{2026}]"], 0, "Verify udev rules files", verify::OPTIONS, None),
     udevadm_verb("cat", &["[FILE\u{2026}]"], 0, "Show udev rules files", cat::OPTIONS, None),
     udevadm_verb("wait", &["DEVICE [DEVICE\u{2026}]"], 0, "Wait for device or device symlink", wait::OPTIONS, None),
@@ -182,7 +182,8 @@ fn run(argv: Vec<Vec<u8>>) -> i32 {
         "wait" => wait::verb_wait_main(vargs),
         "lock" => lock::verb_lock_main(vargs),
         "version" => shared::build::version_only(),
-        name => later::verb_main(name, vargs),
+        "test-builtin" => test_builtin::verb_test_builtin_main(vargs),
+        _ => unreachable!("every verb is handled"),
     }
 }
 

@@ -204,7 +204,7 @@ impl Manager {
             return;
         }
         self.last_usec = now;
-        let mut flags = 0u32;
+        let mut flags = crate::udev::builtin::udev_builtin_should_reload();
         if crate::udev::rules::udev_rules_should_reload(self.rules.as_ref()) {
             flags |= UDEV_RELOAD_RULES | UDEV_RELOAD_KILL_WORKERS;
         }
@@ -220,6 +220,7 @@ impl Manager {
         if flags & UDEV_RELOAD_KILL_WORKERS != 0 {
             self.kill_workers(libc::SIGTERM);
         }
+        crate::udev::builtin::udev_builtin_reload(flags);
         if flags & UDEV_RELOAD_RULES != 0 {
             let timing = self.configs.config.resolve_name_timing.unwrap_or(crate::udev::def::ResolveNameTiming::Early);
             match crate::udev::rules::udev_rules_load(timing, &[]) {

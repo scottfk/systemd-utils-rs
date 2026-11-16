@@ -150,3 +150,36 @@ pub fn bytes(d: &DStr) -> Vec<u8> {
 pub fn udev_property_assignment_is_valid(s: &[u8]) -> bool {
     shared::env::env_assignment_is_valid(s)
 }
+
+/// `encode_devnode_name(str, str_enc, len)`: `\xNN` for backslashes and
+/// characters not allowed in device node names.  When the result does not
+/// fit in `len` bytes C fails, leaving what it wrote so far unterminated;
+/// this returns what was written so far.
+pub fn encode_devnode_name(s: &[u8], len: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < s.len() && s[i] != 0 {
+        let seqlen = shared::utf8::encoded_valid_unichar(&s[i..]).unwrap_or(0);
+        if seqlen > 1 {
+            if len - out.len() < seqlen {
+                return out;
+            }
+            out.extend_from_slice(&s[i..i + seqlen]);
+            i += seqlen;
+            continue;
+        }
+        if s[i] == b'\\' || !allow_listed_char_for_devnode(s[i], None) {
+            if len - out.len() < 5 {
+                return out;
+            }
+            out.extend_from_slice(format!("\\x{:02x}", s[i]).as_bytes());
+        } else {
+            if len - out.len() < 1 {
+                return out;
+            }
+            out.push(s[i]);
+        }
+        i += 1;
+    }
+    out
+}

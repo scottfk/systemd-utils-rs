@@ -2371,3 +2371,24 @@ pub fn setsid_detach() {
         close(fd);
     }
 }
+
+/// `ioctl(fd, SIOCETHTOOL, &ifr)` with `ifr.ifr_data` pointing at `data`
+/// (an ethtool command struct, its first u32 the command).
+pub fn siocethtool(fd: Fd, ifname: &[u8], data: &mut [u8]) -> Result<(), i32> {
+    // SAFETY: ifreq is plain old data.
+    let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
+    for (d, s) in ifr.ifr_name.iter_mut().zip(ifname.iter().take(libc::IFNAMSIZ - 1)) {
+        *d = *s as c_char;
+    }
+    ifr.ifr_ifru.ifru_data = data.as_mut_ptr().cast();
+    // SAFETY: ifr is valid and its data pointer refers to `data`, which is
+    // as large as the command struct the kernel reads and writes.
+    if unsafe {
+        libc::ioctl(fd, 0x8946 /* SIOCETHTOOL */, &mut ifr)
+    } < 0
+    {
+        Err(neg_errno())
+    } else {
+        Ok(())
+    }
+}
