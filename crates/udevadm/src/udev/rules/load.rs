@@ -386,8 +386,7 @@ fn rules_stats_by_path() -> Result<Vec<(Vec<u8>, shared::sys::Stat)>, i32> {
             Err(r) => return Err(r),
             Ok(st) => st,
         };
-        // Empty files are skipped here, but loaded (and their stats
-        // saved) by udev_rules_load(): see QUIRKS.md.
+        // Empty files and /dev/null symlinks count as masked, as when loading.
         if shared::stat_util::null_or_empty(&st) {
             continue;
         }

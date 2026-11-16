@@ -610,3 +610,21 @@ stop
 "#,
     );
 }
+
+#[test]
+fn empty_rules_reload() {
+    check(
+        "empty_rules",
+        r#"
+: > /run/udev/rules.d/10-empty.rules
+echo 'SUBSYSTEM=="net", ENV{E}="1"' > /run/udev/rules.d/50-t.rules
+start -c 1
+link e0 e1
+settle
+sleep 3.2
+echo change > /sys/class/net/e0/uevent
+settle
+stop
+"#,
+    );
+}
