@@ -18,8 +18,8 @@ pub const REMOVE_CHMOD_RESTORE: u32 = 1 << 6;
 pub const REMOVE_SYNCFS: u32 = 1 << 7;
 
 /// `is_physical_fs()`.
-fn is_physical_fs(s: &libc::statfs) -> bool {
-    !is_temporary_fs(s) && s.f_type != CGROUP2_SUPER_MAGIC
+fn is_physical_fs(s: &crate::sys::StatFs) -> bool {
+    !is_temporary_fs(s) && crate::sys::f_type(s) != CGROUP2_SUPER_MAGIC
 }
 
 /// `patch_dirfd_mode()`: Ok((changed, old_mode)).

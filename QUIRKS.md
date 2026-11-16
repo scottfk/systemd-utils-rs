@@ -29,3 +29,13 @@ it's surprising and user-visible; **low** means it's cosmetic or hard to hit.
 | medium | `--strict` doesn't make `update` fail on parse errors (malformed records and properties are only warnings); only a file that can't be read does. |
 | low | A `#` anywhere in a line starts a comment, also inside a property value: ` KEY=a#b` sets `KEY=a`. |
 | low | `query` is silent about a missing or unreadable database (exit status 1) and about a corrupt one (exit status 0, no properties). |
+
+## libudev (sd-device)
+
+| Severity | Quirk |
+|---|---|
+| medium | `udev_device_new_from_environment()` splits each `KEY=value` of the environment in place, writing a NUL over the `=` and leaving it there: after the call, those variables are gone from the process environment (`getenv("TZ")` no longer finds `TZ`), and a second call fails ("Not a key-value pair"). |
+| low | The udev database reader drops a last line that has no newline, and an empty value (`E:` followed by a newline) takes in the next line as its value. |
+| low | The enumerator's rule that a sound card's `controlC` device sorts after its other devices never applies: it looks for the `/` from the start of the devpath instead of after `/sound/card`. |
+| low | `udev_monitor_filter_add_match_subsystem_devtype()` adds a filter on every call, the same subsystem and devtype again included (the filters are keyed by pointer), so the BPF program grows each time. |
+| low | `udev_device_new_from_devnum()` with a type other than `b` or `c` logs (at debug level) the macro expansion of `IN_SET(type, 'b', 'c')` as the failed assertion's text, since `assert_return()` stringifies its argument after expansion. |

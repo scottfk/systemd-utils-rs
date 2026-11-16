@@ -26,11 +26,17 @@ A drop-in port/reimplementation of Gentoo's systemd-utils (udev, libudev, hwdb, 
 
 ## Status
 
-Phases 1 to 3 are done: `systemd-sysctl`, `systemd-tmpfiles` and
-`systemd-hwdb` are ported, along with the shared code the later phases build
-on (see the layout below). 330 sysctl, 893 tmpfiles and 187 hwdb differential
-cases match the C build, and compiling the installed `hwdb.d` gives a
-`hwdb.bin` byte-identical to the C build's (and to the one installed).
+Phases 1 to 4 are done: `systemd-sysctl`, `systemd-tmpfiles`,
+`systemd-hwdb` and `libudev.so.1` (both ABIs) are ported, along with the
+shared code the later phases build on (see the layout below). 330 sysctl,
+893 tmpfiles and 187 hwdb differential cases match the C build, and
+compiling the installed `hwdb.d` gives a `hwdb.bin` byte-identical to the C
+build's (and to the one installed). libudev exports the same 92 versioned
+symbols as C on x86_64 and x86; 102 probe cases match C on each ABI (every
+device on the machine, a made-up sysfs and udev database full of edge
+cases, the monitor fed crafted netlink messages, hwdb lookups, and the
+debug log), and `lsblk`, `findmnt`, `lsusb` and `libinput` print the same
+with either library.
 
 The reference is upstream's tag `v262` (its sources are the same as the release
 tarball's), built as Gentoo builds it ([tools/build-reference.sh](tools/build-reference.sh)):
@@ -52,9 +58,10 @@ same 12 programs, the same exported libudev symbols on both ABIs (92 functions i
 | `crates/sysctl` | `systemd-sysctl` (`src/sysctl/sysctl.c`) |
 | `crates/tmpfiles` | `systemd-tmpfiles` (`src/tmpfiles/tmpfiles.c`, `offline-passwd.c`) |
 | `crates/hwdb` | `systemd-hwdb` (`src/hwdb/hwdb.c`); the compiler and sd-hwdb are `shared::hwdb` (`hwdb-util.c`, `sd-hwdb.c`, `strbuf.c`), for udevadm and libudev later |
+| `crates/libudev` | `libudev.so.1` (`src/libudev`): the C ABI over `shared::sd_device` (`sd-device.c`, `device-private.c`, `device-util.c`), `shared::device_enumerator`, `shared::device_monitor` (with its BPF filter) and `shared::device_filter`; the netlink calls are in `shared::sys_net`, the RTM_GETLINK lookup in `shared::netlink`.  Built as a static library and linked by `tools/link-libudev.sh` with upstream's version script. |
 | `tests/common` | the differential harness, shared by every crate's tests |
 | `tests/shim` | the LD_PRELOAD clock |
-| `tools` | the reference build |
+| `tools` | the reference build, and the libudev link step |
 
 ### Known differences
 
@@ -81,6 +88,18 @@ isn't possible or isn't worth it:
   (merging, hard links, `user.*` xattrs, owners, modes and times), not all of
   `copy.c`; and `inode_same_at()` compares `fstat()` results where C compares
   file handles, which gives the same answers.
+- libudev: C keeps tags, devlinks, sysattr names and child devices in hash
+  sets whose order changes from run to run (and with it the order of the
+  words in `TAGS=`, `CURRENT_TAGS=` and `DEVLINKS=`); the port keeps them
+  sorted, which is one of the orders C uses. The lists libudev hands out are
+  sorted by name either way.
+- libudev: `udev_list_entry_get_by_name()` with a NULL name crashes in C (it
+  hashes the NULL); the port returns NULL.
+- libudev.so.1 is bigger (656 KB stripped, against 421 KB) and, besides
+  libc, needs the dynamic loader (`ld-linux-x86-64.so.2`/`ld-linux.so.2`),
+  for the unwinder of the statically linked libgcc. rustc can't link a
+  library with symbol versions, so `tools/link-libudev.sh` links it from the
+  static library with `cc`.
 - sd-hwdb reads `hwdb.bin` into memory where C maps it; and a lookup whose
   pattern is longer than `LINE_MAX` (2048 bytes, far beyond any real hwdb
   entry) stops matching where C's buffer arithmetic would go wrong.
@@ -107,7 +126,7 @@ init scripts are installed unchanged.
 ## Testing
 
 `make check` builds the C reference into `../systemd` if it isn't there,
-then runs the test suites (so far, the differential cases of phases 1 to 3):
+then runs the test suites (so far, the differential cases of phases 1 to 4):
 
 1. **Differential tests.** Each case runs the C program and the port on copies of the
    same tree, and compares the exit status, stdout, stderr, what was logged, and every
@@ -131,9 +150,16 @@ then runs the test suites (so far, the differential cases of phases 1 to 3):
      under test, e.g. `systemd-hwdb update && systemd-hwdb query …`, so each
      build reads what it wrote.
    - `SYSTEMD_DIFF_SHOW=1 cargo test -- --nocapture` prints each case's outcome.
-   - udev cases run on a fake sysfs (as upstream's own udev tests do) with a private
-     `/run/udev` and `/dev`, through `udevadm test`, `udevadm info` and the libudev API
-     (a small C probe linked against each `libudev.so.1`).
+   - libudev cases run `tests/probe.c`, a small C program that makes libudev calls
+     from its command line and prints every result (and errno), built four times:
+     against each `libudev.so.1` (by rpath), for x86_64 and x86. They read the real
+     sysfs and `/run/udev`, or a made-up sysfs and udev database bound over them
+     (`SYSTEMD_DEVICE_VERIFY_SYSFS=0` lets sd-device accept it); monitor cases run
+     in a network namespace of their own, where the probe can broadcast crafted
+     uevents. Real programs (`lsblk`, `lsusb`, ...) run against each library through
+     `LD_LIBRARY_PATH`, and the exported symbols and versions are compared.
+   - udev cases will run on a fake sysfs (as upstream's own udev tests do) with a
+     private `/run/udev` and `/dev`, through `udevadm test` and `udevadm info`.
    - The daemon is driven with synthetic uevents in a network namespace, and what it
      does (nodes, links, database, the uevents it rebroadcasts) is compared.
 2. **Upstream's own tests** where they can run against a different binary (the

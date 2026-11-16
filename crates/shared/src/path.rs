@@ -382,6 +382,56 @@ pub fn path_extract_directory(path: &[u8]) -> Result<Vec<u8>, i32> {
     Ok(path_split_prefix_filename(path, true, false)?.0.expect("requested"))
 }
 
+/// `path_make_relative(from, to)`: strip the common part, then add ".."
+/// for each remaining component of `from`.
+pub fn path_make_relative(from: &[u8], to: &[u8]) -> Result<Vec<u8>, i32> {
+    if !path_is_absolute(from) || !path_is_absolute(to) {
+        return Err(-libc::EINVAL);
+    }
+    let (mut from, mut to) = (from, to);
+    let t;
+    loop {
+        let (r, f) = path_find_first_component(&mut from, true)?;
+        let (k, tt) = path_find_first_component(&mut to, true)?;
+        if r == 0 {
+            if k == 0 {
+                return Ok(b".".to_vec());
+            }
+            let result = path_simplify(tt);
+            if !path_is_valid(&result) {
+                return Err(-libc::EINVAL);
+            }
+            return Ok(result);
+        }
+        if r != k || f[..r] != tt[..r] {
+            t = tt;
+            break;
+        }
+    }
+    let mut n_parents = 1usize;
+    loop {
+        let (r, _) = path_find_first_component(&mut from, false)?;
+        if r == 0 {
+            break;
+        }
+        n_parents += 1;
+    }
+    if t.is_empty() && n_parents * 3 > PATH_MAX {
+        return Err(-libc::EINVAL);
+    }
+    let mut result = b"../".repeat(n_parents);
+    if t.is_empty() {
+        result.pop();
+        return Ok(result);
+    }
+    result.extend_from_slice(t);
+    let result = path_simplify(&result);
+    if !path_is_valid(&result) {
+        return Err(-libc::EINVAL);
+    }
+    Ok(result)
+}
+
 /// `safe_getcwd()`.
 pub fn safe_getcwd() -> Result<Vec<u8>, i32> {
     let cwd = sys::getcwd()?;

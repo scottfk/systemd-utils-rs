@@ -176,11 +176,14 @@ pub fn conservative_rename(old: &[u8], new: &[u8]) -> Result<bool, i32> {
     Ok(true)
 }
 
+/// `PROC_SUPER_MAGIC`.
+const PROC_SUPER_MAGIC: i64 = 0x9fa0;
+
 /// `proc_mounted()`: is procfs mounted at /proc?  (Errno preserved.)
 pub fn proc_mounted_full() -> Result<bool, i32> {
     let saved = sys::errno();
     let r = match sys::statfs_type(b"/proc/") {
-        Ok(t) => Ok(t == libc::PROC_SUPER_MAGIC),
+        Ok(t) => Ok(t == PROC_SUPER_MAGIC),
         Err(e) if e == -libc::ENOENT => Ok(false),
         Err(e) => Err(e),
     };

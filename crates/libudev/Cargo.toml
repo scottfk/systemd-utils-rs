@@ -1,0 +1,23 @@
+[package]
+name = "libudev"
+description = "Port of libudev (src/libudev), the libudev.so.1 C ABI"
+license = "LGPL-2.1-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+# libudev.so.1 is linked from this static library by tools/link-libudev.sh,
+# with upstream's version script (libudev.sym): rustc's own cdylib version
+# script would drop the symbol versions.
+[lib]
+name = "udev"
+path = "src/lib.rs"
+crate-type = ["staticlib"]
+
+[dependencies]
+libc.workspace = true
+shared = { path = "../shared" }
+
+[lints]
+workspace = true
