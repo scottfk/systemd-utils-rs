@@ -194,6 +194,7 @@ pub fn udev_builtin_run(event: &mut Event, cmd: BuiltinCommand, command: &[u8]) 
     )?;
     use super::builtins as b;
     match cmd {
+        BuiltinCommand::Blkid => b::blkid::run(event, &argv),
         BuiltinCommand::Btrfs => b::btrfs::run(event, &argv),
         BuiltinCommand::FactoryReset => b::factory_reset::run(event, &argv),
         BuiltinCommand::Hwdb => b::hwdb::run(event, &argv),

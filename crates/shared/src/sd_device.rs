@@ -272,11 +272,11 @@ pub fn errno_is_neg_device_absent(r: i32) -> bool {
     r == -libc::ENODEV || r == -libc::ENXIO || r == -libc::ENOENT
 }
 
-fn major(d: u64) -> u32 {
+pub fn major(d: u64) -> u32 {
     libc::major(d)
 }
 
-fn minor(d: u64) -> u32 {
+pub fn minor(d: u64) -> u32 {
     libc::minor(d)
 }
 

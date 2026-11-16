@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! The builtins, one module each (`udev-builtin-*.c`).
 
+pub mod blkid;
 pub mod btrfs;
 pub mod factory_reset;
 pub mod hwdb;

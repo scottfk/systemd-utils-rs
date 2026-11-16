@@ -141,6 +141,21 @@ pub fn safe_atoi(s: &[u8]) -> Result<i32, i32> {
     Ok(l as i32)
 }
 
+/// `safe_atoi64()` (`safe_atolli()`).
+pub fn safe_atoi64(s: &[u8]) -> Result<i64, i32> {
+    let mut base = 0;
+    let s = skip_ws(s);
+    let s = mangle_base(s, &mut base);
+    let (l, consumed, e) = sys::strtoll(s, base as i32);
+    if e > 0 {
+        return Err(-e);
+    }
+    if consumed == 0 || consumed != s.len() || s.contains(&0) {
+        return Err(-libc::EINVAL);
+    }
+    Ok(l)
+}
+
 /// `parse_mode()`: octal, at most 07777.
 pub fn parse_mode(s: &[u8]) -> Result<u32, i32> {
     let m = safe_atou_full(s, 8 | SAFE_ATO_REFUSE_PLUS_MINUS)?;

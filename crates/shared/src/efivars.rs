@@ -159,3 +159,25 @@ pub fn utf16_to_utf8(s: &[u8]) -> Vec<u8> {
 pub fn efi_get_variable_string(variable: &str) -> Result<Vec<u8>, i32> {
     efi_get_variable(variable).map(|(_, v)| utf16_to_utf8(&v))
 }
+
+/// `EFI_VENDOR_LOADER_STR`.
+pub const EFI_VENDOR_LOADER: &str = "4a67b082-0a4c-41cf-b6c7-440b29bb8c4f";
+
+/// `efi_loader_get_device_part_uuid(&ret)`.
+pub fn efi_loader_get_device_part_uuid() -> Result<crate::id128::Id128, i32> {
+    if !is_efi_boot() {
+        return Err(-libc::EOPNOTSUPP);
+    }
+    let s = efi_get_variable_string(&format!("LoaderDevicePartUUID-{EFI_VENDOR_LOADER}"))?;
+    crate::id128::from_string(&s)
+}
+
+/// `efi_guid_to_id128(guid)`: the mixed-endian EFI GUID as an ID.
+pub fn efi_guid_to_id128(g: &[u8]) -> crate::id128::Id128 {
+    let mut b = [0u8; 16];
+    b[0..4].copy_from_slice(&[g[3], g[2], g[1], g[0]]);
+    b[4..6].copy_from_slice(&[g[5], g[4]]);
+    b[6..8].copy_from_slice(&[g[7], g[6]]);
+    b[8..16].copy_from_slice(&g[8..16]);
+    b
+}

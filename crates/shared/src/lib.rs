@@ -63,6 +63,7 @@ pub mod strbuf;
 pub mod string;
 pub mod sys;
 pub mod sys_acl;
+pub mod sys_blkid;
 pub mod sys_dl;
 pub mod sys_kmod;
 pub mod sys_net;
