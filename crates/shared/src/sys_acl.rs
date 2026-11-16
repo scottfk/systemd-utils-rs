@@ -31,11 +31,11 @@ type PermsetT = *mut c_void;
 
 #[derive(Debug)]
 struct Lib {
-    #[allow(dead_code)] // for udev's uaccess, later
     add_perm: unsafe extern "C" fn(PermsetT, c_uint) -> c_int,
     calc_mask: unsafe extern "C" fn(*mut AclT) -> c_int,
     copy_entry: unsafe extern "C" fn(EntryT, EntryT) -> c_int,
     create_entry: unsafe extern "C" fn(*mut AclT, *mut EntryT) -> c_int,
+    delete_entry: unsafe extern "C" fn(AclT, EntryT) -> c_int,
     delete_perm: unsafe extern "C" fn(PermsetT, c_uint) -> c_int,
     dup: unsafe extern "C" fn(AclT) -> AclT,
     free: unsafe extern "C" fn(*mut c_void) -> c_int,
@@ -49,6 +49,8 @@ struct Lib {
     get_tag_type: unsafe extern "C" fn(EntryT, *mut c_int) -> c_int,
     init: unsafe extern "C" fn(c_int) -> AclT,
     set_file: unsafe extern "C" fn(*const c_char, c_uint, AclT) -> c_int,
+    set_qualifier: unsafe extern "C" fn(EntryT, *const c_void) -> c_int,
+    set_tag_type: unsafe extern "C" fn(EntryT, c_int) -> c_int,
     to_any_text: unsafe extern "C" fn(AclT, *const c_char, c_char, c_int) -> *mut c_char,
 }
 
@@ -139,10 +141,8 @@ pub fn dlopen_libacl(log_level: i32) -> Result<(), i32> {
             calc_mask: std::mem::transmute::<*mut c_void, _>(sym("acl_calc_mask")?),
             copy_entry: std::mem::transmute::<*mut c_void, _>(sym("acl_copy_entry")?),
             create_entry: std::mem::transmute::<*mut c_void, _>(sym("acl_create_entry")?),
-            delete_perm: {
-                let _ = sym("acl_delete_entry")?;
-                std::mem::transmute::<*mut c_void, _>(sym("acl_delete_perm")?)
-            },
+            delete_entry: std::mem::transmute::<*mut c_void, _>(sym("acl_delete_entry")?),
+            delete_perm: std::mem::transmute::<*mut c_void, _>(sym("acl_delete_perm")?),
             dup: std::mem::transmute::<*mut c_void, _>(sym("acl_dup")?),
             free: {
                 let _ = sym("acl_entries")?;
@@ -165,12 +165,12 @@ pub fn dlopen_libacl(log_level: i32) -> Result<(), i32> {
                 let _ = sym("acl_set_fd")?;
                 std::mem::transmute::<*mut c_void, _>(sym("acl_set_file")?)
             },
-            to_any_text: {
+            set_qualifier: {
                 let _ = sym("acl_set_permset")?;
-                let _ = sym("acl_set_qualifier")?;
-                let _ = sym("acl_set_tag_type")?;
-                std::mem::transmute::<*mut c_void, _>(sym("acl_to_any_text")?)
+                std::mem::transmute::<*mut c_void, _>(sym("acl_set_qualifier")?)
             },
+            set_tag_type: std::mem::transmute::<*mut c_void, _>(sym("acl_set_tag_type")?),
+            to_any_text: std::mem::transmute::<*mut c_void, _>(sym("acl_to_any_text")?),
         }
     };
     let _ = LIB.set(lib);
@@ -578,5 +578,107 @@ pub fn dlopen_probe(filename: &[u8]) -> Result<(), (i32, Option<Vec<u8>>)> {
     }
     // SAFETY: closing the handle dlopen() returned.
     unsafe { libc::dlclose(dl) };
+    Ok(())
+}
+
+/// `devnode_acl(fd, uids)`: gives exactly `uids` (except root) read and
+/// write access to the device node, removing other users' entries.
+pub fn devnode_acl(fd: i32, uids: &[u32]) -> Result<(), i32> {
+    dlopen_libacl(libc::LOG_DEBUG)?;
+    let l = lib();
+    let path = to_cstring(&crate::fd::proc_fd_path(fd));
+    // SAFETY: path is NUL-terminated.
+    let raw = unsafe { (l.get_file)(path.as_ptr(), ACL_TYPE_ACCESS) };
+    if raw.is_null() {
+        return Err(neg_errno());
+    }
+    let mut acl = Acl(raw);
+    let mut found: Vec<u32> = Vec::new();
+    let mut changed = false;
+    let mut e: EntryT = std::ptr::null_mut();
+    // SAFETY: acl.0 is live; e is a valid out-pointer.  Every call below
+    // works on entries of this live ACL.
+    unsafe {
+        let mut r = (l.get_entry)(acl.0, ACL_FIRST_ENTRY, &mut e);
+        while r > 0 {
+            if tag_of(e)? == ACL_USER {
+                let mut keep = false;
+                if !uids.is_empty() {
+                    let q = (l.get_qualifier)(e);
+                    if q.is_null() {
+                        return Err(neg_errno());
+                    }
+                    let u = *(q as *const u32);
+                    // C leaks the qualifier here; freeing it changes nothing visible.
+                    (l.free)(q);
+                    if uids.contains(&u) {
+                        let mut ps: PermsetT = std::ptr::null_mut();
+                        if (l.get_permset)(e, &mut ps) < 0 {
+                            return Err(neg_errno());
+                        }
+                        let rd = (l.get_perm)(ps, ACL_READ);
+                        if rd < 0 {
+                            return Err(neg_errno());
+                        }
+                        let wt = (l.get_perm)(ps, ACL_WRITE);
+                        if wt < 0 {
+                            return Err(neg_errno());
+                        }
+                        if rd == 0 || wt == 0 {
+                            if (l.add_perm)(ps, ACL_READ | ACL_WRITE) < 0 {
+                                return Err(neg_errno());
+                            }
+                            changed = true;
+                        }
+                        if !found.contains(&u) {
+                            found.push(u);
+                        }
+                        keep = true;
+                    }
+                }
+                if !keep {
+                    if (l.delete_entry)(acl.0, e) < 0 {
+                        return Err(neg_errno());
+                    }
+                    changed = true;
+                }
+            }
+            r = (l.get_entry)(acl.0, ACL_NEXT_ENTRY, &mut e);
+        }
+        if r < 0 {
+            return Err(neg_errno());
+        }
+        for &uid in uids {
+            if uid == 0 || found.contains(&uid) {
+                continue;
+            }
+            if (l.create_entry)(&mut acl.0, &mut e) < 0 {
+                return Err(neg_errno());
+            }
+            if (l.set_tag_type)(e, ACL_USER) < 0 {
+                return Err(neg_errno());
+            }
+            if (l.set_qualifier)(e, (&uid as *const u32).cast()) < 0 {
+                return Err(neg_errno());
+            }
+            let mut ps: PermsetT = std::ptr::null_mut();
+            if (l.get_permset)(e, &mut ps) < 0 {
+                return Err(neg_errno());
+            }
+            if (l.add_perm)(ps, ACL_READ | ACL_WRITE) < 0 {
+                return Err(neg_errno());
+            }
+            changed = true;
+        }
+        if !changed {
+            return Ok(());
+        }
+        if (l.calc_mask)(&mut acl.0) < 0 {
+            return Err(neg_errno());
+        }
+        if (l.set_file)(path.as_ptr(), ACL_TYPE_ACCESS, acl.0) < 0 {
+            return Err(neg_errno());
+        }
+    }
     Ok(())
 }

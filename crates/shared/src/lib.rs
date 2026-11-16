@@ -52,6 +52,7 @@ pub mod proc_cmdline;
 pub mod process;
 pub mod rm_rf;
 pub mod sd_device;
+pub mod sd_login;
 pub mod sd_path;
 pub mod signal;
 pub mod siphash;
