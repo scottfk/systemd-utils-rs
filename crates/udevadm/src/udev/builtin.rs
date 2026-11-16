@@ -202,6 +202,7 @@ pub fn udev_builtin_run(event: &mut Event, cmd: BuiltinCommand, command: &[u8]) 
         BuiltinCommand::Kmod => b::kmod::run(event, &argv),
         BuiltinCommand::NetDriver => b::net_driver::run(event, &argv),
         BuiltinCommand::UsbId => b::usb_id::run(event, &argv),
+        BuiltinCommand::PathId => b::path_id::run(event, &argv),
         _ => {
             log_device_debug!(event.dev, "Built-in command '", builtin(cmd).name, "' is not ported yet.");
             Err(-libc::EOPNOTSUPP)
