@@ -150,6 +150,15 @@ pub fn parse_mode(s: &[u8]) -> Result<u32, i32> {
     Ok(m)
 }
 
+/// `parse_ifindex()`.
+pub fn parse_ifindex(s: &[u8]) -> Result<i32, i32> {
+    let i = safe_atoi(s)?;
+    if i <= 0 {
+        return Err(-libc::EINVAL);
+    }
+    Ok(i)
+}
+
 /// `parse_devnum()`: "MAJOR:MINOR".
 pub fn parse_devnum(s: &[u8]) -> Result<u64, i32> {
     let n = s.iter().take_while(|b| b.is_ascii_digit()).count();

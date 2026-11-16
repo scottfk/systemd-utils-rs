@@ -1,8 +1,11 @@
 # Makefile - front door for building and testing systemd-utils-rs
 #
 # 20261115 - Created by Claude (claude.ai, Anthropic) - scottfk
+# 20261116 - Link libudev.so.1 in the release build; libudev32 target - Claude - scottfk
 #
-#   make              release build (target/release/)
+#   make              release build (target/release/, and
+#                     target/release/libudev/libudev.so.1)
+#   make libudev32    the x86 libudev.so.1 (target/i686-unknown-linux-gnu/release/libudev/)
 #   make reference    build the C reference at tools/REFERENCE_TAG into ../systemd
 #   make check        build the reference if needed, then run every test
 #                     (the differential suites)
@@ -12,12 +15,16 @@
 CARGO     ?= cargo
 REFERENCE ?= ../systemd
 
-.PHONY: all build reference check test clippy fmt clean
+.PHONY: all build libudev32 reference check test clippy fmt clean
 
 all: build
 
 build:
 	$(CARGO) build --release
+	CARGO=$(CARGO) tools/link-libudev.sh --release
+
+libudev32:
+	CARGO=$(CARGO) tools/link-libudev.sh --release --target i686-unknown-linux-gnu
 
 reference:
 	@if [ ! -x $(REFERENCE)/build/systemd-sysctl ]; then tools/build-reference.sh $(REFERENCE); fi

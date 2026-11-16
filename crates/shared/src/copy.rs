@@ -22,7 +22,7 @@ fn ids(st: &Stat, uid: u32, gid: u32) -> (u32, u32) {
 }
 
 fn times(st: &Stat) -> ((i64, i64), (i64, i64)) {
-    ((st.st_atime, st.st_atime_nsec), (st.st_mtime, st.st_mtime_nsec))
+    (crate::sys::stat_atime(st), crate::sys::stat_mtime(st))
 }
 
 /// `HardlinkContext`: a directory below the target holding a hard link of

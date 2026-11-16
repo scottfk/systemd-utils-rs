@@ -8,7 +8,7 @@
 //! Known difference: `SYSTEMD_LOG_LOCATION=1` and the journal's `CODE_FILE=`
 //! name the Rust source location, not the C one.
 
-use std::cell::RefCell;
+use std::sync::Mutex;
 
 use crate::errno::{errno_value, is_synthetic, strerror};
 use crate::extract::{EXTRACT_DONT_COALESCE_SEPARATORS, extract_first_word};
@@ -155,41 +155,42 @@ struct LogState {
     kmsg_ratelimit: RateLimit,
 }
 
-thread_local! {
-    static LOG: RefCell<LogState> = const { RefCell::new(LogState {
-        target: LogTarget::Console,
-        max_level: LOG_INFO,
-        target_max_level: [i32::MAX; 4],
-        facility: libc::LOG_DAEMON,
-        ratelimit_kmsg: true,
-        console_fd: 2,
-        console_fd_is_tty: -1,
-        syslog_fd: -1,
-        kmsg_fd: -1,
-        journal_fd: -1,
-        syslog_is_stream: false,
-        show_color: -1,
-        show_location: false,
-        show_time: false,
-        show_tid: false,
-        upgrade_syslog_to_journal: false,
-        always_reopen_console: false,
-        open_when_needed: false,
-        prohibit_ipc: false,
-        prefix: None,
-        dumb: -1,
-        kmsg_ratelimit: RateLimit { interval: 5_000_000, burst: 200, num: 0, begin: 0 },
-    }) };
-    static PROGRAM: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
-}
+// A process global, as in C: a library's callers may log from any thread.
+static LOG: Mutex<LogState> = Mutex::new(LogState {
+    target: LogTarget::Console,
+    max_level: LOG_INFO,
+    target_max_level: [i32::MAX; 4],
+    facility: libc::LOG_DAEMON,
+    ratelimit_kmsg: true,
+    console_fd: 2,
+    console_fd_is_tty: -1,
+    syslog_fd: -1,
+    kmsg_fd: -1,
+    journal_fd: -1,
+    syslog_is_stream: false,
+    show_color: -1,
+    show_location: false,
+    show_time: false,
+    show_tid: false,
+    upgrade_syslog_to_journal: false,
+    always_reopen_console: false,
+    open_when_needed: false,
+    prohibit_ipc: false,
+    prefix: None,
+    dumb: -1,
+    kmsg_ratelimit: RateLimit { interval: 5_000_000, burst: 200, num: 0, begin: 0 },
+});
+static PROGRAM: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 
 fn with<R>(f: impl FnOnce(&mut LogState) -> R) -> R {
-    LOG.with(|l| f(&mut l.borrow_mut()))
+    f(&mut LOG.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
 /// `program_invocation_short_name`.
 pub fn program_name() -> Vec<u8> {
-    PROGRAM.with(|p| p.borrow().clone())
+    let p = PROGRAM.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    // In a library, nothing set it: use glibc's, as C does.
+    if p.is_empty() { sys::program_invocation_short_name() } else { p }
 }
 
 /// `save_argc_argv()`'s effect on `program_invocation_short_name`: the
@@ -199,12 +200,12 @@ pub fn set_program_name(argv0: &[u8]) {
         Some(i) => &argv0[i + 1..],
         None => argv0,
     };
-    PROGRAM.with(|p| *p.borrow_mut() = short.to_vec());
+    *PROGRAM.lock().unwrap_or_else(|e| e.into_inner()) = short.to_vec();
 }
 
 /// Set `program_invocation_short_name` directly (after `rename_process()`).
 pub fn set_short_name(short: &[u8]) {
-    PROGRAM.with(|p| *p.borrow_mut() = short.to_vec());
+    *PROGRAM.lock().unwrap_or_else(|e| e.into_inner()) = short.to_vec();
 }
 
 /// `getpid_cached()`.
@@ -914,14 +915,21 @@ fn log_do_header(level: i32, error: i32, loc: Option<Loc>, extra: &[(&[u8], &[u8
     h
 }
 
-fn write_to_journal(s: &mut LogState, level: i32, error: i32, loc: Loc, buffer: &[u8]) -> i32 {
+fn write_to_journal(
+    s: &mut LogState,
+    level: i32,
+    error: i32,
+    loc: Loc,
+    object: &[(&[u8], &[u8])],
+    buffer: &[u8],
+) -> i32 {
     if s.journal_fd < 0 {
         return 0;
     }
     if log_pri(level) > s.target_max_level[2] {
         return 0;
     }
-    let header = log_do_header(level, error, Some(loc), &[]);
+    let header = log_do_header(level, error, Some(loc), object);
     let prefix = s.prefix.clone();
     let mut parts: Vec<&[u8]> = vec![&header, b"MESSAGE="];
     if let Some(p) = &prefix {
@@ -937,7 +945,13 @@ fn write_to_journal(s: &mut LogState, level: i32, error: i32, loc: Loc, buffer: 
 }
 
 /// `log_dispatch_internal()`: one message, split at newlines.
-pub fn log_dispatch(mut level: i32, error: i32, loc: Loc, buffer: &[u8]) -> i32 {
+pub fn log_dispatch(level: i32, error: i32, loc: Loc, buffer: &[u8]) -> i32 {
+    log_dispatch_object(level, error, loc, &[], buffer)
+}
+
+/// `log_dispatch_internal()` with an object field (`DEVICE=` and the like),
+/// which only the journal sees.
+pub fn log_dispatch_object(mut level: i32, error: i32, loc: Loc, object: &[(&[u8], &[u8])], buffer: &[u8]) -> i32 {
     use LogTarget::*;
     let ret = -errno_value(error);
     with(|s| {
@@ -964,7 +978,7 @@ pub fn log_dispatch(mut level: i32, error: i32, loc: Loc, buffer: &[u8]) -> i32 
             let line = crate::bytes::c_str_prefix(line);
             let mut k = 0;
             if matches!(s.target, Auto | JournalOrKmsg | Journal) {
-                k = write_to_journal(s, level, error, loc, line);
+                k = write_to_journal(s, level, error, loc, object, line);
                 if k < 0 && k != -libc::EAGAIN {
                     log_close_journal(s);
                 }
@@ -1009,6 +1023,42 @@ pub fn log_internal(level: i32, error: i32, loc: Loc, msg: Vec<u8>) -> i32 {
         return -errno_value(error);
     }
     log_dispatch(level, error, loc, &truncate_line(msg))
+}
+
+/// `log_object_internal(level, error, ..., object_field, object, NULL, NULL, ...)`:
+/// like [`log_internal`], with an object field for the journal.
+pub fn log_object_internal(level: i32, error: i32, loc: Loc, object: Option<(&[u8], &[u8])>, msg: Vec<u8>) -> i32 {
+    if log_pri(level) > log_get_max_level() {
+        return -errno_value(error);
+    }
+    let o: Vec<(&[u8], &[u8])> = object.into_iter().collect();
+    // LOG_SET_PREFIX(object): the object prefixes the message, on every target.
+    let saved = log_set_prefix(object.map(|(_, v)| v.to_vec()));
+    let r = log_dispatch_object(level, error, loc, &o, &truncate_line(msg));
+    log_set_prefix(saved);
+    r
+}
+
+/// `log_assert_failed(text, file, line, func)`: a failed `assert()`, logged
+/// with C's source location, then abort().
+pub fn log_assert_failed(text: &str, file: &'static str, line: u32, func: &'static str) -> ! {
+    if log_pri(LOG_CRIT) <= log_get_max_level() {
+        let msg = format!("Assertion '{text}' failed at {file}:{line}, function {func}(). Aborting.").into_bytes();
+        log_dispatch(LOG_CRIT, 0, Loc { file, line, func }, &truncate_line(msg));
+    }
+    std::process::abort()
+}
+
+/// `log_assert_failed_return(text, file, line, func)`, which `assert_return()`
+/// calls: a debug message naming the C source location (the caller passes
+/// C's, so the message is the same).
+pub fn log_assert_failed_return(text: &str, file: &'static str, line: u32, func: &'static str) {
+    let e = sys::errno();
+    if log_pri(LOG_DEBUG) <= log_get_max_level() {
+        let msg = format!("Assertion '{text}' failed at {file}:{line}, function {func}(), ignoring.").into_bytes();
+        log_dispatch(LOG_DEBUG, 0, Loc { file, line, func }, &truncate_line(msg));
+    }
+    sys::set_errno(e);
 }
 
 /// `log_struct_internal()` for the common case: extra journal fields plus a

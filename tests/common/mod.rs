@@ -132,6 +132,12 @@ pub struct Case {
     /// program's name runs the implementation under test (a symlink in
     /// `T/.bin`, first on $PATH).  The case's args are then unused.
     pub shell: Option<String>,
+    /// Run in a network namespace of its own (the sandbox's root then has
+    /// CAP_NET_ADMIN there, e.g. to broadcast on the uevent netlink socket).
+    pub netns: bool,
+    /// Preload the clock shim (the default); off for 32-bit programs,
+    /// which can't load the 64-bit shim.
+    pub faketime: bool,
 }
 
 impl Case {
@@ -154,6 +160,8 @@ impl Case {
             touch: Vec::new(),
             own_root: false,
             shell: None,
+            netns: false,
+            faketime: true,
         }
     }
 
@@ -267,6 +275,14 @@ impl Case {
     }
     pub fn shell(mut self, script: &str) -> Case {
         self.shell = Some(script.to_string());
+        self
+    }
+    pub fn netns(mut self) -> Case {
+        self.netns = true;
+        self
+    }
+    pub fn no_faketime(mut self) -> Case {
+        self.faketime = false;
         self
     }
     pub fn own_root(mut self) -> Case {
@@ -401,6 +417,8 @@ struct Spawn {
     ctty: bool,
     /// Chroot into a root of our own before exec.
     newroot: Option<NewRoot>,
+    /// Also unshare the network namespace.
+    netns: bool,
     exe: CString,
     argv: Vec<CString>,
     envp: Vec<CString>,
@@ -506,7 +524,8 @@ fn spawn_in_sandbox(s: Spawn) -> u32 {
         unsafe {
             libc::close(go_w);
             libc::close(up_r);
-            if libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNS) != 0 {
+            let net = if s.netns { libc::CLONE_NEWNET } else { 0 };
+            if libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNS | net) != 0 {
                 libc::_exit(120);
             }
             libc::write(up_w, b"u".as_ptr().cast(), 1);
@@ -658,6 +677,7 @@ fn root_shell(t: &Path, script: &str) -> Vec<u8> {
         stdio: [null.as_raw_fd(), outf.as_raw_fd(), outf.as_raw_fd()],
         ctty: false,
         newroot: None,
+        netns: false,
         exe: cstr("/bin/sh"),
         argv: vec![cstr("sh"), cstr("-c"), cstr(script)],
         envp: vec![cstr("PATH=/usr/bin:/bin"), cstr("LC_ALL=C")],
@@ -926,10 +946,11 @@ pub fn run(case: &Case, prog: &Program, label: &str, bin: &Path) -> Outcome {
         None => [stdin.as_raw_fd(), stdout.as_raw_fd(), stderr.as_raw_fd()],
     };
 
-    let mut envp = vec![
-        cstr(format!("LD_PRELOAD={}", shim().display())),
-        cstr(format!("TEST_FAKETIME={}", fixed_root().join(".faketime").display())),
-    ];
+    let mut envp = Vec::new();
+    if case.faketime {
+        envp.push(cstr(format!("LD_PRELOAD={}", shim().display())));
+        envp.push(cstr(format!("TEST_FAKETIME={}", fixed_root().join(".faketime").display())));
+    }
     for (k, v) in &case.env {
         envp.push(cstr(format!("{k}={}", subst(v))));
     }
@@ -954,6 +975,7 @@ pub fn run(case: &Case, prog: &Program, label: &str, bin: &Path) -> Outcome {
         stdio,
         ctty: pty.is_some(),
         newroot: if case.own_root { Some(NewRoot::new(&t, bin)) } else { None },
+        netns: case.netns,
         exe,
         argv,
         envp,

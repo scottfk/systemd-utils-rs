@@ -17,8 +17,32 @@ unsafe extern "C" {
     fn secure_getenv_c(name: *const c_char) -> *mut c_char;
     fn fgetpwent(stream: *mut libc::FILE) -> *mut libc::passwd;
     fn fgetgrent(stream: *mut libc::FILE) -> *mut libc::group;
+    #[link_name = "program_invocation_short_name"]
+    static PROGRAM_INVOCATION_SHORT_NAME: *const c_char;
 }
-pub type Stat = libc::stat;
+/// `struct stat` with 64-bit offsets and inodes: what C gets with
+/// `_FILE_OFFSET_BITS=64` (as systemd builds), also on 32-bit x86.
+pub type Stat = libc::stat64;
+/// `st_atime` and its nanoseconds (32-bit on x86, where `time_t` is).
+#[allow(clippy::unnecessary_cast)]
+pub fn stat_atime(st: &Stat) -> (i64, i64) {
+    (st.st_atime as i64, st.st_atime_nsec as i64)
+}
+
+/// `st_mtime` and its nanoseconds.
+#[allow(clippy::unnecessary_cast)]
+pub fn stat_mtime(st: &Stat) -> (i64, i64) {
+    (st.st_mtime as i64, st.st_mtime_nsec as i64)
+}
+
+/// `struct statfs` likewise.
+pub type StatFs = libc::statfs64;
+
+/// `F_TYPE_EQUAL()`'s view of `f_type`: the magic as an unsigned 32-bit
+/// value (on 32-bit x86, `f_type` is a signed int).
+pub fn f_type(s: &StatFs) -> i64 {
+    s.f_type as u32 as i64
+}
 
 /// `errno`.
 pub fn errno() -> i32 {
@@ -94,6 +118,16 @@ pub fn getpid() -> i32 {
     unsafe { libc::getpid() }
 }
 
+/// glibc's `program_invocation_short_name`.
+pub fn program_invocation_short_name() -> Vec<u8> {
+    // SAFETY: glibc sets it before main() to a NUL-terminated string (or it
+    // stays NULL in odd cases, which is checked).
+    unsafe {
+        let p = PROGRAM_INVOCATION_SHORT_NAME;
+        if p.is_null() { Vec::new() } else { CStr::from_ptr(p).to_bytes().to_vec() }
+    }
+}
+
 pub fn gettid() -> i32 {
     // SAFETY: gettid() has no preconditions.
     unsafe { libc::gettid() }
@@ -140,14 +174,14 @@ pub fn stat_zero() -> Stat {
 pub fn fstat(fd: Fd) -> Result<Stat, i32> {
     let mut st = stat_zero();
     // SAFETY: st is a valid out-pointer.
-    if unsafe { libc::fstat(fd, &mut st) } < 0 { Err(neg_errno()) } else { Ok(st) }
+    if unsafe { libc::fstat64(fd, &mut st) } < 0 { Err(neg_errno()) } else { Ok(st) }
 }
 
 pub fn stat(path: &[u8]) -> Result<Stat, i32> {
     let c = to_cstring(path);
     let mut st = stat_zero();
     // SAFETY: c is NUL-terminated, st is a valid out-pointer.
-    if unsafe { libc::stat(c.as_ptr(), &mut st) } < 0 { Err(neg_errno()) } else { Ok(st) }
+    if unsafe { libc::stat64(c.as_ptr(), &mut st) } < 0 { Err(neg_errno()) } else { Ok(st) }
 }
 
 /// `fstatat(dirfd, path, flags)`.
@@ -155,20 +189,20 @@ pub fn fstatat(dirfd: Fd, path: &[u8], flags: c_int) -> Result<Stat, i32> {
     let c = to_cstring(path);
     let mut st = stat_zero();
     // SAFETY: c is NUL-terminated, st is a valid out-pointer.
-    if unsafe { libc::fstatat(dirfd, c.as_ptr(), &mut st, flags) } < 0 { Err(neg_errno()) } else { Ok(st) }
+    if unsafe { libc::fstatat64(dirfd, c.as_ptr(), &mut st, flags) } < 0 { Err(neg_errno()) } else { Ok(st) }
 }
 
 pub fn open(path: &[u8], flags: c_int, mode: u32) -> Result<Fd, i32> {
     let c = to_cstring(path);
     // SAFETY: c is NUL-terminated.
-    let fd = unsafe { libc::open(c.as_ptr(), flags, mode as libc::c_uint) };
+    let fd = unsafe { libc::open64(c.as_ptr(), flags, mode as libc::c_uint) };
     if fd < 0 { Err(neg_errno()) } else { Ok(fd) }
 }
 
 pub fn openat(dirfd: Fd, path: &[u8], flags: c_int, mode: u32) -> Result<Fd, i32> {
     let c = to_cstring(path);
     // SAFETY: c is NUL-terminated.
-    let fd = unsafe { libc::openat(dirfd, c.as_ptr(), flags, mode as libc::c_uint) };
+    let fd = unsafe { libc::openat64(dirfd, c.as_ptr(), flags, mode as libc::c_uint) };
     if fd < 0 { Err(neg_errno()) } else { Ok(fd) }
 }
 
@@ -278,7 +312,7 @@ pub fn sendto_unix(fd: Fd, data: &[u8], path: &[u8]) -> Result<usize, i32> {
 
 pub fn lseek(fd: Fd, off: i64, whence: c_int) -> Result<i64, i32> {
     // SAFETY: lseek() has no memory preconditions.
-    let r = unsafe { libc::lseek(fd, off, whence) };
+    let r = unsafe { libc::lseek64(fd, off, whence) };
     if r < 0 { Err(neg_errno()) } else { Ok(r) }
 }
 
@@ -454,7 +488,7 @@ impl Dir {
     pub fn next_entry(&mut self) -> Result<Option<(Vec<u8>, u8)>, i32> {
         set_errno(0);
         // SAFETY: self.0 is a live DIR*.
-        let e = unsafe { libc::readdir(self.0) };
+        let e = unsafe { libc::readdir64(self.0) };
         if e.is_null() {
             let er = errno();
             return if er != 0 { Err(-er) } else { Ok(None) };
@@ -743,8 +777,8 @@ pub fn ignore_signal(sig: c_int) {
 pub fn getrlimit_nofile() -> Result<(u64, u64), i32> {
     // SAFETY: rlimit is plain old data and the pointer is valid.
     unsafe {
-        let mut rl: libc::rlimit = std::mem::zeroed();
-        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl) < 0 {
+        let mut rl: libc::rlimit64 = std::mem::zeroed();
+        if libc::getrlimit64(libc::RLIMIT_NOFILE, &mut rl) < 0 {
             return Err(neg_errno());
         }
         Ok((rl.rlim_cur, rl.rlim_max))
@@ -753,9 +787,9 @@ pub fn getrlimit_nofile() -> Result<(u64, u64), i32> {
 
 /// `setrlimit(RLIMIT_NOFILE, {soft, hard})`.
 pub fn setrlimit_nofile(soft: u64, hard: u64) -> Result<(), i32> {
-    let rl = libc::rlimit { rlim_cur: soft, rlim_max: hard };
+    let rl = libc::rlimit64 { rlim_cur: soft, rlim_max: hard };
     // SAFETY: rl is a valid rlimit.
-    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &rl) } < 0 { Err(neg_errno()) } else { Ok(()) }
+    if unsafe { libc::setrlimit64(libc::RLIMIT_NOFILE, &rl) } < 0 { Err(neg_errno()) } else { Ok(()) }
 }
 
 /// `execvp(file, argv)`; returns only on failure, with errno set.
@@ -1210,23 +1244,23 @@ pub fn getgid() -> u32 {
 pub fn statfs_type(path: &[u8]) -> Result<i64, i32> {
     let c = to_cstring(path);
     // SAFETY: statfs is plain old data; c is NUL-terminated.
-    let mut s: libc::statfs = unsafe { std::mem::zeroed() };
+    let mut s: StatFs = unsafe { std::mem::zeroed() };
     // SAFETY: as above.
-    if unsafe { libc::statfs(c.as_ptr(), &mut s) } < 0 {
+    if unsafe { libc::statfs64(c.as_ptr(), &mut s) } < 0 {
         return Err(neg_errno());
     }
-    Ok(s.f_type as i64)
+    Ok(f_type(&s))
 }
 
 /// `fstatfs(fd).f_type`.
 pub fn fstatfs_type(fd: Fd) -> Result<i64, i32> {
     // SAFETY: statfs is plain old data.
-    let mut s: libc::statfs = unsafe { std::mem::zeroed() };
+    let mut s: StatFs = unsafe { std::mem::zeroed() };
     // SAFETY: s is a valid out-pointer.
-    if unsafe { libc::fstatfs(fd, &mut s) } < 0 {
+    if unsafe { libc::fstatfs64(fd, &mut s) } < 0 {
         return Err(neg_errno());
     }
-    Ok(s.f_type as i64)
+    Ok(f_type(&s))
 }
 
 /// `strtoll(s, &end, base)`: (value, bytes consumed, errno).
@@ -1532,7 +1566,7 @@ pub fn rmdir(path: &[u8]) -> Result<(), i32> {
 /// `ftruncate(fd, len)`.
 pub fn ftruncate(fd: Fd, len: i64) -> Result<(), i32> {
     // SAFETY: plain syscall.
-    if unsafe { libc::ftruncate(fd, len) } < 0 { Err(neg_errno()) } else { Ok(()) }
+    if unsafe { libc::ftruncate64(fd, len) } < 0 { Err(neg_errno()) } else { Ok(()) }
 }
 
 /// `syncfs(fd)`.
@@ -1575,11 +1609,11 @@ pub fn dir_has_entry(fd: Fd, skip: &dyn Fn(&[u8]) -> bool) -> Result<bool, i32> 
 }
 
 /// `fstatfs(fd)`: the whole struct.
-pub fn fstatfs(fd: Fd) -> Result<libc::statfs, i32> {
+pub fn fstatfs(fd: Fd) -> Result<StatFs, i32> {
     // SAFETY: statfs is plain old data.
-    let mut s: libc::statfs = unsafe { std::mem::zeroed() };
+    let mut s: StatFs = unsafe { std::mem::zeroed() };
     // SAFETY: s is a valid out-pointer.
-    if unsafe { libc::fstatfs(fd, &mut s) } < 0 {
+    if unsafe { libc::fstatfs64(fd, &mut s) } < 0 {
         return Err(neg_errno());
     }
     Ok(s)

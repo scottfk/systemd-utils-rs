@@ -970,13 +970,8 @@ impl Hwdb {
             }
         }
         map.truncate(got);
-        let h = Hwdb {
-            map,
-            properties: Vec::new(),
-            properties_modified: false,
-            iterator: 0,
-            mtime: (st.st_mtime, st.st_mtime_nsec),
-        };
+        let h =
+            Hwdb { map, properties: Vec::new(), properties_modified: false, iterator: 0, mtime: sys::stat_mtime(&st) };
         if h.map.len() < HEADER_SIZE as usize || &h.map[..8] != HWDB_SIG || st.st_size as u64 != h.u64_at(16) {
             return Err(log_debug_errno!(synthetic(libc::EINVAL), "Failed to recognize the format of ", path, "."));
         }
@@ -1033,8 +1028,8 @@ impl Hwdb {
     }
 
     /// `SD_HWDB_FOREACH_PROPERTY()`: errors end the loop silently.
-/// QUIRK: so `systemd-hwdb query` on a corrupt database prints nothing and
-/// succeeds.
+    /// QUIRK: so `systemd-hwdb query` on a corrupt database prints nothing and
+    /// succeeds.
     pub fn properties(&mut self, modalias: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
         let _ = self.seek(modalias);
         let mut out = Vec::new();

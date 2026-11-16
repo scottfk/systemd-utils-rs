@@ -214,19 +214,31 @@ pub fn read_full_file(path: &[u8]) -> Result<Vec<u8>, i32> {
     Ok(data)
 }
 
+/// `read_full_file(path, &ret, &ret_size)`: the contents, NULs and all.
+pub fn read_full_file_with_nuls(path: &[u8]) -> Result<Vec<u8>, i32> {
+    fopen_re(path)?.read_to_end()
+}
+
 /// `read_virtual_file_fd(fd, max_size, &ret, NULL)`: (contents, untruncated).
 pub fn read_virtual_file_fd(fd: i32, max_size: usize) -> Result<(Vec<u8>, bool), i32> {
     let fd = OwnedFd::new(fd_reopen(fd, libc::O_RDONLY | libc::O_NOCTTY | libc::O_CLOEXEC)?);
-    read_virtual_file_owned(fd, max_size)
+    read_virtual_file_owned(fd, max_size, false)
+}
+
+/// `read_virtual_file_fd(fd, max_size, &ret, &ret_size)`: the same, but
+/// the contents may hold NULs.
+pub fn read_virtual_file_fd_with_size(fd: i32, max_size: usize) -> Result<(Vec<u8>, bool), i32> {
+    let fd = OwnedFd::new(fd_reopen(fd, libc::O_RDONLY | libc::O_NOCTTY | libc::O_CLOEXEC)?);
+    read_virtual_file_owned(fd, max_size, true)
 }
 
 /// `read_virtual_file_at(dir_fd, filename, max_size, &ret, NULL)`.
 pub fn read_virtual_file(path: &[u8], max_size: usize) -> Result<(Vec<u8>, bool), i32> {
     let fd = OwnedFd::new(sys::openat(AT_FDCWD, path, libc::O_RDONLY | libc::O_NOCTTY | libc::O_CLOEXEC, 0)?);
-    read_virtual_file_owned(fd, max_size)
+    read_virtual_file_owned(fd, max_size, false)
 }
 
-fn read_virtual_file_owned(fd: OwnedFd, max_size: usize) -> Result<(Vec<u8>, bool), i32> {
+fn read_virtual_file_owned(fd: OwnedFd, max_size: usize, nul_ok: bool) -> Result<(Vec<u8>, bool), i32> {
     let mut n_retries = 3;
     let mut truncated = false;
     let (buf, n) = loop {
@@ -273,7 +285,7 @@ fn read_virtual_file_owned(fd: OwnedFd, max_size: usize) -> Result<(Vec<u8>, boo
     };
     let mut buf = buf;
     buf.truncate(n);
-    if buf.contains(&0) {
+    if !nul_ok && buf.contains(&0) {
         return Err(-libc::EBADMSG);
     }
     Ok((buf, !truncated))
@@ -351,6 +363,18 @@ fn write_string_stream(fd: i32, line: &[u8], flags: u32) -> Result<(), i32> {
         crate::sys::fsync(fd)?;
     }
     Ok(())
+}
+
+/// `write_string_file_fd(fd, line, flags)`: reopen `fd` (which may be
+/// O_PATH) for writing, then write as `write_string_stream_full()` does.
+pub fn write_string_file_fd(fd: i32, line: &[u8], flags: u32) -> Result<(), i32> {
+    let mut oflags = libc::O_CLOEXEC | libc::O_NOCTTY;
+    oflags |= if flags & WRITE_STRING_FILE_SUPPRESS_REDUNDANT_VIRTUAL != 0 { libc::O_RDWR } else { libc::O_WRONLY };
+    if flags & WRITE_STRING_FILE_TRUNCATE != 0 {
+        oflags |= libc::O_TRUNC;
+    }
+    let fd = OwnedFd::new(crate::fd::fd_reopen(fd, oflags)?);
+    write_string_stream(fd.raw(), line, flags)
 }
 
 /// `write_string_file(fn, line, flags)` (non-atomic forms).

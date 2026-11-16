@@ -196,11 +196,11 @@ pub fn dir_is_empty_at(dir_fd: Fd, path: Option<&[u8]>, ignore_hidden_or_backup:
 
 /// `is_fs_type_at(dir_fd, path, magic)`.
 pub fn is_fs_type_at(dir_fd: Fd, path: Option<&[u8]>, magic: i64) -> Result<bool, i32> {
-    Ok(xstatfsat(dir_fd, path)?.f_type == magic)
+    Ok(sys::f_type(&xstatfsat(dir_fd, path)?) == magic)
 }
 
 /// `xstatfsat(dir_fd, path, &s)`.
-pub fn xstatfsat(dir_fd: Fd, path: Option<&[u8]>) -> Result<libc::statfs, i32> {
+pub fn xstatfsat(dir_fd: Fd, path: Option<&[u8]>) -> Result<sys::StatFs, i32> {
     match path {
         Some(p) if !p.is_empty() => {
             let fd = xopenat(dir_fd, Some(p), libc::O_PATH | libc::O_CLOEXEC)?;
@@ -221,8 +221,8 @@ pub fn xstatfsat(dir_fd: Fd, path: Option<&[u8]>) -> Result<libc::statfs, i32> {
 }
 
 /// `is_temporary_fs()`.
-pub fn is_temporary_fs(s: &libc::statfs) -> bool {
-    matches!(s.f_type, TMPFS_MAGIC | RAMFS_MAGIC)
+pub fn is_temporary_fs(s: &sys::StatFs) -> bool {
+    matches!(sys::f_type(s), TMPFS_MAGIC | RAMFS_MAGIC)
 }
 
 /// `is_mount_point_at(dir_fd, path, flags)`.
