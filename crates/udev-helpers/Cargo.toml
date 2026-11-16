@@ -1,0 +1,28 @@
+[package]
+name = "udev-helpers"
+description = "Ports of the udev helper programs (src/udev/*_id, iocost, mtd_probe)"
+license = "GPL-2.0-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lib]
+name = "udev_helpers"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fido_id"
+path = "src/bin/fido_id.rs"
+
+[[bin]]
+name = "v4l_id"
+path = "src/bin/v4l_id.rs"
+
+[dependencies]
+libc.workspace = true
+shared = { path = "../shared" }
+udevadm = { path = "../udevadm" }
+
+[lints]
+workspace = true
