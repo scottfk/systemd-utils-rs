@@ -219,7 +219,7 @@ pub fn getpid_cached() -> i32 {
 }
 
 /// `fd_move_above_stdio()`.
-fn fd_move_above_stdio(fd: i32) -> i32 {
+pub fn fd_move_above_stdio(fd: i32) -> i32 {
     if !(0..=2).contains(&fd) {
         return fd;
     }
@@ -466,6 +466,12 @@ pub fn log_set_target(mut t: LogTarget) {
         }
         s.target = t;
     })
+}
+
+/// `log_set_target_and_open()`.
+pub fn log_set_target_and_open(t: LogTarget) {
+    log_set_target(t);
+    log_open();
 }
 
 /// `log_get_target()`.

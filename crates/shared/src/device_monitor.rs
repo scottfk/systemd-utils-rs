@@ -146,7 +146,12 @@ impl Monitor {
     }
 
     /// `device_monitor_new_full(ret, group, -EBADF)`.
-    pub fn new_full(mut group: MonitorGroup) -> Result<Monitor, i32> {
+    pub fn new_full(group: MonitorGroup) -> Result<Monitor, i32> {
+        Monitor::new_full_fd(group, None)
+    }
+
+    /// `device_monitor_new_full(ret, group, fd)`: takes `fd` on success.
+    pub fn new_full_fd(mut group: MonitorGroup, fd: Option<i32>) -> Result<Monitor, i32> {
         if group == MonitorGroup::Udev
             && sys_net::access(b"/run/udev/control", libc::F_OK).is_err()
             && dev_is_devtmpfs().is_none_or(|b| !b)
@@ -155,15 +160,18 @@ impl Monitor {
             log_debug!("sd-device-monitor(n/a): The udev service seems not to be active, disabling the monitor.");
             group = MonitorGroup::None;
         }
-        let sock = match sys::socket(
-            libc::AF_NETLINK,
-            libc::SOCK_RAW | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
-            libc::NETLINK_KOBJECT_UEVENT,
-        ) {
-            Ok(s) => OwnedFd::new(s),
-            Err(e) => {
-                return Err(log_debug_errno!(e, "sd-device-monitor(n/a): Failed to create socket: ", strerror(e)));
-            }
+        let sock = match fd {
+            Some(fd) => OwnedFd::new(fd),
+            None => match sys::socket(
+                libc::AF_NETLINK,
+                libc::SOCK_RAW | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+                libc::NETLINK_KOBJECT_UEVENT,
+            ) {
+                Ok(s) => OwnedFd::new(s),
+                Err(e) => {
+                    return Err(log_debug_errno!(e, "sd-device-monitor(n/a): Failed to create socket: ", strerror(e)));
+                }
+            },
         };
         let mut m = Monitor {
             sock,
@@ -180,19 +188,26 @@ impl Monitor {
             filter_uptodate: false,
             description: None,
         };
-        if let Err(e) = sys::setsockopt_int(m.sock.raw(), libc::SOL_SOCKET, libc::SO_PASSCRED, 1) {
+        if fd.is_none()
+            && let Err(e) = sys::setsockopt_int(m.sock.raw(), libc::SOL_SOCKET, libc::SO_PASSCRED, 1)
+        {
             return Err(log_debug_errno!(
                 e,
                 "sd-device-monitor(n/a): Failed to set socket option SO_PASSCRED: ",
                 strerror(e)
             ));
         }
-        if let Err(e) = sys_net::bind_netlink(m.sock.raw(), 0, m.nl_groups) {
+        if fd.is_none()
+            && let Err(e) = sys_net::bind_netlink(m.sock.raw(), 0, m.nl_groups)
+        {
             return Err(log_debug_errno!(e, "sd-device-monitor(n/a): Failed to bind monitoring socket: ", strerror(e)));
         }
         match sys_net::getsockname_netlink(m.sock.raw()) {
             Ok((pid, _)) => m.nl_pid = pid,
             Err(e) => {
+                if fd.is_some() {
+                    let _ = m.sock.into_raw();
+                }
                 return Err(log_debug_errno!(
                     e,
                     "sd-device-monitor(n/a): Failed to set netlink address: ",
@@ -217,7 +232,9 @@ impl Monitor {
                 Ok(true) => {}
             }
         }
-        if let Err(e) = m.set_receive_buffer_size(128 * 1024 * 1024) {
+        if fd.is_none()
+            && let Err(e) = m.set_receive_buffer_size(128 * 1024 * 1024)
+        {
             log_debug_errno!(
                 e,
                 "sd-device-monitor(n/a): Failed to increase receive buffer size, ignoring: ",
@@ -235,6 +252,16 @@ impl Monitor {
     /// `device_monitor_get_address()`: (nl_pid, nl_groups).
     pub fn get_address(&self) -> (u32, u32) {
         (self.nl_pid, self.nl_groups)
+    }
+
+    /// The netlink port id of a monitor (for `allow_unicast_sender_pid()`).
+    pub fn address_of(m: &Monitor) -> u32 {
+        m.nl_pid
+    }
+
+    /// `device_monitor_allow_unicast_sender()` by port id.
+    pub fn allow_unicast_sender_pid(&mut self, pid: u32) {
+        self.trusted_sender_pid = pid;
     }
 
     /// `device_monitor_allow_unicast_sender()`.

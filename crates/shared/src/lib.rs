@@ -4,12 +4,15 @@
 //! the C file it ports; each function names the C function.
 
 pub mod argv;
+pub mod blockdev;
 pub mod btrfs;
 pub mod build;
 pub mod bytes;
 pub mod capability;
+pub mod cgroup;
 pub mod chase;
 pub mod chattr;
+pub mod common_signal;
 pub mod conf_files;
 pub mod conf_parser;
 pub mod copy;
@@ -21,6 +24,7 @@ pub mod env;
 pub mod env_file;
 pub mod errno;
 pub mod escape;
+pub mod event;
 pub mod extract;
 pub mod fd;
 pub mod fileio;
@@ -63,5 +67,6 @@ pub mod time;
 pub mod user;
 pub mod userdb;
 pub mod utf8;
+pub mod varlink;
 pub mod virt;
 pub mod xattr;

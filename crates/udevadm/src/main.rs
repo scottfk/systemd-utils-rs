@@ -10,11 +10,18 @@ use shared::options::{
 };
 
 mod cat;
+mod control;
 mod hwdb;
 mod info;
 mod later;
+mod lock;
+mod monitor;
+mod settle;
 mod test;
+mod trigger;
+mod udevd;
 mod verify;
+mod wait;
 
 pub use udevadm::{udev, util};
 
@@ -54,16 +61,16 @@ const fn udevadm_verb(
 pub const VERBS: &[Verb] = &[
     Verb::new("help", &[], VERB_ANY, VERB_ANY, 0, Some("Show this help")),
     udevadm_verb("info", &["[DEVPATH|FILE]"], 0, "Query sysfs or the udev database", info::OPTIONS, None),
-    udevadm_verb("trigger", &["DEVPATH"], 0, "Request events from the kernel", later::TRIGGER, None),
-    udevadm_verb("settle", &[], 0, "Wait for pending udev events", later::SETTLE, None),
-    udevadm_verb("control", &[], VERB_OPTION_REQUIRED, "Control the udev daemon", later::CONTROL, None),
-    udevadm_verb("monitor", &[], 0, "Listen to kernel and udev events", later::MONITOR, None),
+    udevadm_verb("trigger", &["DEVPATH"], 0, "Request events from the kernel", trigger::OPTIONS, None),
+    udevadm_verb("settle", &[], 0, "Wait for pending udev events", settle::OPTIONS, None),
+    udevadm_verb("control", &[], VERB_OPTION_REQUIRED, "Control the udev daemon", control::OPTIONS, None),
+    udevadm_verb("monitor", &[], 0, "Listen to kernel and udev events", monitor::OPTIONS, None),
     udevadm_verb("test", &["DEVPATH"], 0, "Test an event run", test::OPTIONS, None),
     udevadm_verb("test-builtin", &["COMMAND DEVPATH"], 0, "Test a built-in command", later::TEST_BUILTIN, None),
     udevadm_verb("verify", &["[FILE\u{2026}]"], 0, "Verify udev rules files", verify::OPTIONS, None),
     udevadm_verb("cat", &["[FILE\u{2026}]"], 0, "Show udev rules files", cat::OPTIONS, None),
-    udevadm_verb("wait", &["DEVICE [DEVICE\u{2026}]"], 0, "Wait for device or device symlink", later::WAIT, None),
-    udevadm_verb("lock", &["COMMAND", "--print"], 0, "Lock a block device and run a command", later::LOCK, None),
+    udevadm_verb("wait", &["DEVICE [DEVICE\u{2026}]"], 0, "Wait for device or device symlink", wait::OPTIONS, None),
+    udevadm_verb("lock", &["COMMAND", "--print"], 0, "Lock a block device and run a command", lock::OPTIONS, None),
     udevadm_verb(
         "hwdb",
         &[],
@@ -94,26 +101,7 @@ pub fn print_verb_help(name: &str) -> i32 {
     shared::options::command_print_verb_help(&COMMAND, name, Some(pager_flags()))
 }
 
-/// The `udevd` namespace (`udev-config.c`): only for `--introspect-cli`
-/// until udevd is ported.
-const UDEVD_OPTIONS: &[Opt] = &[
-    common::help(OPT_HELP),
-    common::version_with_v(OPT_VERSION),
-    Opt::new(OPT_DEBUG, b'd', Some("daemon"), None, Some("Detach and run in the background")),
-    Opt::new(OPT_DEBUG, b'D', Some("debug"), None, Some("Enable debug output")),
-    Opt::new(OPT_DEBUG, b'c', Some("children-max"), Some("INT"), Some("Set maximum number of workers")),
-    Opt::new(OPT_DEBUG, b'e', Some("exec-delay"), Some("SECONDS"), Some("Seconds to wait before executing RUN=")),
-    Opt::new(
-        OPT_DEBUG,
-        b't',
-        Some("event-timeout"),
-        Some("SECONDS"),
-        Some("Seconds to wait before terminating an event"),
-    ),
-    verify::resolve_names(OPT_DEBUG),
-    Opt::long(OPT_DEBUG, "timeout-signal", Some("SIGNAL"), Some("Signal used when terminating an event")),
-    common::introspect_cli(OPT_INTROSPECT_CLI),
-];
+const UDEVD_OPTIONS: &[Opt] = udevd::config::OPTIONS;
 
 /// The `COMMAND()` of `udev-config.c`.
 pub const UDEVD_COMMAND: Command = Command {
@@ -124,6 +112,11 @@ pub const UDEVD_COMMAND: Command = Command {
     man_pages: &["systemd-udevd.service(8)"],
     verbs: &[],
 };
+
+/// `command_print_help_name("systemd-udevd")`.
+pub fn print_udevd_help() -> i32 {
+    command_print_help(&UDEVD_COMMAND, UDEVD_OPTIONS, Some(pager_flags()))
+}
 
 /// `introspect_cli(flags)`: udevadm, then systemd-udevd.
 pub fn introspect(flags: u32) -> i32 {
@@ -161,7 +154,7 @@ fn parse_argv(argv: Vec<Vec<u8>>) -> Result<Option<Vec<Vec<u8>>>, i32> {
 /// `run()`.
 fn run(argv: Vec<Vec<u8>>) -> i32 {
     if util::invoked_as(&argv, b"udevd") {
-        return later::run_udevd(argv);
+        return udevd::run_udevd(argv);
     }
     let _ = udev::util::udev_parse_config();
     shared::log::log_setup();
@@ -182,6 +175,12 @@ fn run(argv: Vec<Vec<u8>>) -> i32 {
         "verify" => verify::verb_verify_main(vargs),
         "cat" => cat::verb_cat_main(vargs),
         "hwdb" => hwdb::verb_hwdb_main(vargs),
+        "control" => control::verb_control_main(vargs),
+        "settle" => settle::verb_settle_main(vargs),
+        "monitor" => monitor::verb_monitor_main(vargs),
+        "trigger" => trigger::verb_trigger_main(vargs),
+        "wait" => wait::verb_wait_main(vargs),
+        "lock" => lock::verb_lock_main(vargs),
         "version" => shared::build::version_only(),
         name => later::verb_main(name, vargs),
     }

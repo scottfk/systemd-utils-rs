@@ -37,3 +37,17 @@ pub fn set_unset_env(name: &[u8], value: Option<&[u8]>) -> Result<(), i32> {
         None => sys::unsetenv(name),
     }
 }
+
+/// `env_name_is_valid()` (of the first `n` bytes).
+pub fn env_name_is_valid(e: &[u8]) -> bool {
+    !e.is_empty() && !e[0].is_ascii_digit() && e.iter().all(|&c| c.is_ascii_alphanumeric() || c == b'_')
+}
+
+/// `env_assignment_is_valid()`: NAME=VALUE with a valid name and a UTF-8
+/// value (the ARG_MAX limits are not checked).
+pub fn env_assignment_is_valid(e: &[u8]) -> bool {
+    match e.iter().position(|&c| c == b'=') {
+        None => false,
+        Some(i) => env_name_is_valid(&e[..i]) && crate::utf8::is_valid(&e[i + 1..]),
+    }
+}

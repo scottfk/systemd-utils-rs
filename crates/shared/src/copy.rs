@@ -482,3 +482,27 @@ pub fn copy_tree_at(fdf: Fd, from: &[u8], fdt: Fd, to: &[u8], uid: u32, gid: u32
     let r = fd_copy_tree_generic(fdf, from, &st, fdt, to, COPY_DEPTH_MAX, uid, gid, copy_flags, None);
     if r < 0 { r } else { 0 }
 }
+
+/// `copy_file_at(dir_fdf, from, dir_fdt, to, 0, mode, 0)`: a regular file's
+/// bytes, times and user xattrs; the target is not truncated, and is
+/// removed again on failure.
+pub fn copy_file_at(dir_fdf: Fd, from: &[u8], dir_fdt: Fd, to: &[u8], mode: u32) -> Result<(), i32> {
+    let fdf = sys::OwnedFd::new(sys::openat(dir_fdf, from, libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOCTTY, 0)?);
+    let st = sys::fstat(fdf.raw())?;
+    if st.st_mode & libc::S_IFMT != libc::S_IFREG {
+        return Err(if st.st_mode & libc::S_IFMT == libc::S_IFDIR { -libc::EISDIR } else { -libc::EBADFD });
+    }
+    let old = sys::umask(0);
+    let fdt = sys::openat(dir_fdt, to, libc::O_WRONLY | libc::O_CREAT | libc::O_CLOEXEC | libc::O_NOCTTY, mode);
+    sys::umask(old);
+    let fdt = sys::OwnedFd::new(fdt?);
+    if let Err(r) = copy_bytes(fdf.raw(), fdt.raw()) {
+        drop(fdt);
+        let _ = sys::unlinkat(dir_fdt, to, 0);
+        return Err(r);
+    }
+    let (a, m) = times(&st);
+    let _ = sys::futimens_ts(fdt.raw(), a, m);
+    copy_xattr_fd(fdf.raw(), fdt.raw());
+    Ok(())
+}

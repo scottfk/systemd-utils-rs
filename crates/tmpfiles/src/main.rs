@@ -146,31 +146,7 @@ macro_rules! log_action {
 
 /// `running_in_chroot()` (`virt.c`).
 pub fn running_in_chroot() -> i32 {
-    match shared::env::getenv_bool("SYSTEMD_IN_CHROOT") {
-        Ok(b) => return b as i32,
-        Err(r) if r != -libc::ENXIO => {
-            log_debug_errno!(r, "Failed to parse $SYSTEMD_IN_CHROOT, ignoring: ", strerror(r));
-        }
-        Err(_) => {}
-    }
-    if shared::env::getenv_bool("SYSTEMD_IGNORE_CHROOT") == Ok(true) {
-        return 0;
-    }
-    match shared::stat_util::inode_same_at(libc::AT_FDCWD, Some(b"/proc/1/root"), libc::AT_FDCWD, Some(b"/"), 0) {
-        Err(r) if r == -libc::ENOENT => match shared::fs::proc_mounted_full() {
-            Ok(false) => {
-                if sys::getpid() == 1 {
-                    return 0;
-                }
-                log_debug!("/proc/ is not mounted, assuming we're in a chroot.");
-                1
-            }
-            Ok(true) => -libc::ENOSYS,
-            Err(_) => log_debug_errno!(r, "Failed to check if /proc/1/root and / are the same inode: ", strerror(r)),
-        },
-        Err(r) => log_debug_errno!(r, "Failed to check if /proc/1/root and / are the same inode: ", strerror(r)),
-        Ok(same) => !same as i32,
-    }
+    shared::virt::running_in_chroot()
 }
 
 /// `user_config_paths()`.

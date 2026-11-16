@@ -121,3 +121,19 @@ pub fn get_boot() -> Result<Id128, i32> {
         r => r,
     }
 }
+
+/// `sd_id128_randomize()`: a random v4 UUID.
+pub fn randomize() -> Result<Id128, i32> {
+    let mut t = [0u8; 16];
+    sys::getrandom(&mut t)?;
+    // id128_make_v4_uuid()
+    t[6] = (t[6] & 0x0f) | 0x40;
+    t[8] = (t[8] & 0x3f) | 0x80;
+    Ok(t)
+}
+
+/// `SD_ID128_TO_UUID_STRING()`.
+pub fn to_uuid_string(id: &Id128) -> Vec<u8> {
+    let h = to_string(id);
+    crate::bcat!(&h[0..8], "-", &h[8..12], "-", &h[12..16], "-", &h[16..20], "-", &h[20..32])
+}

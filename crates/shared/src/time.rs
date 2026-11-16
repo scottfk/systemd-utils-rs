@@ -289,3 +289,23 @@ pub fn format_timespan(mut t: u64, accuracy: u64) -> Vec<u8> {
     }
     out
 }
+
+/// `FORMAT_BYTES(t)`: IEC units, one decimal below the point, trailing "B".
+pub fn format_bytes(t: u64) -> Vec<u8> {
+    const TABLE: [(&str, u64); 6] =
+        [("E", 1 << 60), ("P", 1 << 50), ("T", 1 << 40), ("G", 1 << 30), ("M", 1 << 20), ("K", 1 << 10)];
+    let n = TABLE.len();
+    for i in 0..n {
+        if t >= TABLE[i].1 {
+            // Upstream's remainder for all but the last unit.
+            let remainder =
+                if i != n - 1 { (t / TABLE[i + 1].1 * 10 / TABLE[n - 1].1) % 10 } else { (t * 10 / TABLE[i].1) % 10 };
+            return if remainder > 0 {
+                format!("{}.{}{}", t / TABLE[i].1, remainder, TABLE[i].0).into_bytes()
+            } else {
+                format!("{}{}", t / TABLE[i].1, TABLE[i].0).into_bytes()
+            };
+        }
+    }
+    format!("{t}B").into_bytes()
+}

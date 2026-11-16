@@ -309,3 +309,18 @@ pub fn verify_regular_at(dir_fd: Fd, path: &[u8], follow: bool) -> Result<(), i3
         if path.is_empty() { libc::AT_EMPTY_PATH } else { 0 } | if follow { 0 } else { libc::AT_SYMLINK_NOFOLLOW };
     stat_verify_regular(&sys::fstatat(dir_fd, path, flags)?)
 }
+
+/// `stat_inode_unmodified(a, b)`.
+pub fn stat_inode_unmodified(a: &sys::Stat, b: &sys::Stat) -> bool {
+    let fmt = a.st_mode & libc::S_IFMT;
+    stat_inode_same(a, b)
+        && sys::stat_mtime(a) == sys::stat_mtime(b)
+        && (fmt != libc::S_IFREG || a.st_size == b.st_size)
+        && (!(fmt == libc::S_IFCHR || fmt == libc::S_IFBLK) || a.st_rdev == b.st_rdev)
+}
+
+/// `null_or_empty(st)`: an empty regular file or a character device.
+pub fn null_or_empty(st: &sys::Stat) -> bool {
+    let fmt = st.st_mode & libc::S_IFMT;
+    (fmt == libc::S_IFREG && st.st_size <= 0) || fmt == libc::S_IFCHR
+}

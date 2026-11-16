@@ -717,3 +717,34 @@ pub fn detect_confidential_virtualization() -> ConfidentialVirtualization {
 pub fn confidential_virtualization_to_string(v: ConfidentialVirtualization) -> Option<&'static str> {
     Some(v)
 }
+
+/// `running_in_chroot()` (`virt.c`).
+pub fn running_in_chroot() -> i32 {
+    match crate::env::getenv_bool("SYSTEMD_IN_CHROOT") {
+        Ok(b) => return b as i32,
+        Err(r) if r != -libc::ENXIO => {
+            crate::log_debug_errno!(r, "Failed to parse $SYSTEMD_IN_CHROOT, ignoring: ", strerror(r));
+        }
+        Err(_) => {}
+    }
+    if crate::env::getenv_bool("SYSTEMD_IGNORE_CHROOT") == Ok(true) {
+        return 0;
+    }
+    match crate::stat_util::inode_same_at(libc::AT_FDCWD, Some(b"/proc/1/root"), libc::AT_FDCWD, Some(b"/"), 0) {
+        Err(r) if r == -libc::ENOENT => match crate::fs::proc_mounted_full() {
+            Ok(false) => {
+                if crate::sys::getpid() == 1 {
+                    return 0;
+                }
+                crate::log_debug!("/proc/ is not mounted, assuming we're in a chroot.");
+                1
+            }
+            Ok(true) => -libc::ENOSYS,
+            Err(_) => {
+                crate::log_debug_errno!(r, "Failed to check if /proc/1/root and / are the same inode: ", strerror(r))
+            }
+        },
+        Err(r) => crate::log_debug_errno!(r, "Failed to check if /proc/1/root and / are the same inode: ", strerror(r)),
+        Ok(same) => !same as i32,
+    }
+}

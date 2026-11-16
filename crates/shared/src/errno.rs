@@ -22,6 +22,21 @@ pub const fn errno_value(val: i32) -> i32 {
     val.abs() & !(1 << 30)
 }
 
+/// `ERRNO_IS_NEG_NOT_SUPPORTED(r)`.
+pub fn is_neg_not_supported(r: i32) -> bool {
+    matches!(
+        -r,
+        libc::EOPNOTSUPP
+            | libc::ENOTTY
+            | libc::ENOSYS
+            | libc::EAFNOSUPPORT
+            | libc::EPFNOSUPPORT
+            | libc::EPROTONOSUPPORT
+            | libc::ESOCKTNOSUPPORT
+            | libc::ENOPROTOOPT
+    )
+}
+
 /// `ERRNO_IS_NEG_PRIVILEGE(r)`.
 pub fn is_neg_privilege(r: i32) -> bool {
     r == -EACCES || r == -EPERM
