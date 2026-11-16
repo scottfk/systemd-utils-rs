@@ -98,6 +98,7 @@ fn hooks() -> Vec<Hooks> {
             exit: Some(b::kmod::exit),
             should_reload: Some(b::kmod::should_reload),
         },
+        Hooks { cmd: BuiltinCommand::NetId, init: Some(b::net_id::init), exit: None, should_reload: None },
     ]
 }
 
@@ -202,6 +203,7 @@ pub fn udev_builtin_run(event: &mut Event, cmd: BuiltinCommand, command: &[u8]) 
         BuiltinCommand::Keyboard => b::keyboard::run(event, &argv),
         BuiltinCommand::Kmod => b::kmod::run(event, &argv),
         BuiltinCommand::NetDriver => b::net_driver::run(event, &argv),
+        BuiltinCommand::NetId => b::net_id::run(event, &argv),
         BuiltinCommand::UsbId => b::usb_id::run(event, &argv),
         BuiltinCommand::PathId => b::path_id::run(event, &argv),
         BuiltinCommand::Uaccess => b::uaccess::run(event, &argv),

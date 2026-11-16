@@ -2093,6 +2093,7 @@ impl Device {
         let value = self.get_sysattr_value(sysattr)?;
         safe_atoi(value.bytes())
             .map_err(|e| log_device_debug_errno!(self, e, "Failed to parse '", sysattr, "' attribute: ", strerror(e)))
+            .map_err(|e| log_device_debug_errno!(self, e, "Failed to parse '", sysattr, "' attribute: ", strerror(e)))
     }
 
     /// `device_get_sysattr_unsigned_full()`.

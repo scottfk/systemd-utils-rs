@@ -504,6 +504,12 @@ impl Dir {
         unsafe { libc::dirfd(self.0) }
     }
 
+    /// `rewinddir()`.
+    pub fn rewind(&mut self) {
+        // SAFETY: self.0 is a live DIR*.
+        unsafe { libc::rewinddir(self.0) }
+    }
+
     /// Give up ownership of the `DIR*`.
     fn into_raw(self) -> *mut libc::DIR {
         let d = self.0;
@@ -2391,4 +2397,21 @@ pub fn siocethtool(fd: Fd, ifname: &[u8], data: &mut [u8]) -> Result<(), i32> {
     } else {
         Ok(())
     }
+}
+
+unsafe extern "C" {
+    #[link_name = "inet_pton"]
+    fn inet_pton_raw(af: c_int, src: *const c_char, dst: *mut libc::c_void) -> c_int;
+}
+
+/// `inet_pton(family, s, buf)`: the address bytes, None if `s` isn't one.
+pub fn inet_pton(family: c_int, s: &[u8]) -> Option<Vec<u8>> {
+    let c = to_cstring(s);
+    let mut buf = [0u8; 16];
+    // SAFETY: c is NUL-terminated; buf holds an in6_addr.
+    let r = unsafe { inet_pton_raw(family, c.as_ptr(), buf.as_mut_ptr().cast()) };
+    if r <= 0 {
+        return None;
+    }
+    Some(buf[..if family == libc::AF_INET { 4 } else { 16 }].to_vec())
 }

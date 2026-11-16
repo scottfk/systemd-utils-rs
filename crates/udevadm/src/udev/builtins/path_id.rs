@@ -456,9 +456,7 @@ pub fn run(event: &mut Event, _argv: &[Vec<u8>]) -> Result<(), i32> {
                     next = Some(skip_subsystem(p.clone(), b"serio"));
                 }
             } else if in_sub(b"auxiliary") {
-                if let Some(sf) =
-                    p.get_sysattr_value(b"sfnum").ok().and_then(|v| shared::parse::safe_atou(v.bytes()).ok())
-                {
+                if let Ok(sf) = p.get_sysattr_unsigned_full(b"sfnum", 0) {
                     both(&mut path, &mut compat_path, format!("sf-{sf}").into_bytes());
                 }
             } else if in_sub(b"pci") {
