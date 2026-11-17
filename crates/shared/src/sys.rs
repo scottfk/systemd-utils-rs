@@ -2447,3 +2447,88 @@ pub fn format_g(v: f64, precision: Option<i32>) -> Vec<u8> {
     };
     buf[..(n.max(0) as usize).min(buf.len() - 1)].to_vec()
 }
+
+/// `SG_IO`.
+const SG_IO: u64 = 0x2285;
+
+/// The status fields an `SG_IO` request reports.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SgStatus {
+    /// v4: device_status, transport_status, driver_status.  v3: status,
+    /// host_status, driver_status.
+    pub a: u32,
+    pub b: u32,
+    pub c: u32,
+    /// v3: the residual count (`resid`); v4: din_resid.
+    pub resid: i32,
+}
+
+/// `ioctl(fd, SG_IO, &io_v4)` with a `struct sg_io_v4` for a SCSI command
+/// reading into `data` (BSG_PROTOCOL_SCSI, BSG_SUB_PROTOCOL_SCSI_CMD).
+pub fn sg_io_v4(fd: Fd, cdb: &[u8], sense: &mut [u8], data: &mut [u8], timeout_ms: u32) -> Result<SgStatus, i32> {
+    let mut io = [0u8; 160];
+    let put32 = |io: &mut [u8; 160], o: usize, v: u32| io[o..o + 4].copy_from_slice(&v.to_ne_bytes());
+    let put64 = |io: &mut [u8; 160], o: usize, v: u64| io[o..o + 8].copy_from_slice(&v.to_ne_bytes());
+    put32(&mut io, 0, b'Q' as u32);
+    put32(&mut io, 12, cdb.len() as u32);
+    put64(&mut io, 16, cdb.as_ptr() as usize as u64);
+    put32(&mut io, 44, sense.len() as u32);
+    put64(&mut io, 48, sense.as_mut_ptr() as usize as u64);
+    put32(&mut io, 68, data.len() as u32);
+    put64(&mut io, 80, data.as_mut_ptr() as usize as u64);
+    put32(&mut io, 88, timeout_ms);
+    // SAFETY: io is a struct sg_io_v4 whose pointers refer to cdb (read
+    // only), sense and data, all valid for the lengths given and
+    // exclusively borrowed for the call.
+    if unsafe { libc::ioctl(fd, SG_IO as _, io.as_mut_ptr()) } != 0 {
+        return Err(neg_errno());
+    }
+    let get32 = |o: usize| u32::from_ne_bytes(io[o..o + 4].try_into().expect("4 bytes"));
+    Ok(SgStatus { a: get32(116), b: get32(112), c: get32(108), resid: get32(136) as i32 })
+}
+
+/// `ioctl(fd, SG_IO, &io_hdr)` with a `struct sg_io_hdr` (version 3)
+/// reading into `data` (SG_DXFER_FROM_DEV), or writing nothing when
+/// `data` is empty and `dir` is SG_DXFER_NONE.
+pub fn sg_io_v3(
+    fd: Fd,
+    cdb: &[u8],
+    sense: &mut [u8],
+    data: &mut [u8],
+    dir: i32,
+    timeout_ms: u32,
+) -> Result<SgStatus, i32> {
+    #[cfg(target_pointer_width = "64")]
+    const L: (usize, usize, usize, usize, usize, usize, usize, usize) = (88, 16, 24, 32, 40, 64, 68, 70);
+    #[cfg(target_pointer_width = "32")]
+    const L: (usize, usize, usize, usize, usize, usize, usize, usize) = (64, 16, 20, 24, 28, 44, 48, 50);
+    let (size, dxferp, cmdp, sbp, timeout, status, host, driver) = L;
+    let mut io = vec![0u8; size];
+    io[0..4].copy_from_slice(&(b'S' as i32).to_ne_bytes());
+    io[4..8].copy_from_slice(&dir.to_ne_bytes());
+    io[8] = cdb.len() as u8;
+    io[9] = sense.len() as u8;
+    io[12..16].copy_from_slice(&(data.len() as u32).to_ne_bytes());
+    let ptr = |io: &mut Vec<u8>, o: usize, p: usize| {
+        let b = p.to_ne_bytes();
+        io[o..o + b.len()].copy_from_slice(&b);
+    };
+    ptr(&mut io, dxferp, if data.is_empty() { 0 } else { data.as_mut_ptr() as usize });
+    ptr(&mut io, cmdp, cdb.as_ptr() as usize);
+    ptr(&mut io, sbp, sense.as_mut_ptr() as usize);
+    io[timeout..timeout + 4].copy_from_slice(&timeout_ms.to_ne_bytes());
+    // SAFETY: io is a struct sg_io_hdr whose pointers refer to cdb (read
+    // only), sense and data, all valid for the lengths given and
+    // exclusively borrowed for the call.
+    if unsafe { libc::ioctl(fd, SG_IO as _, io.as_mut_ptr()) } != 0 {
+        return Err(neg_errno());
+    }
+    // resid follows driver_status (72 or 52).
+    let resid = status + 8;
+    Ok(SgStatus {
+        a: io[status] as u32,
+        b: u16::from_ne_bytes([io[host], io[host + 1]]) as u32,
+        c: u16::from_ne_bytes([io[driver], io[driver + 1]]) as u32,
+        resid: i32::from_ne_bytes(io[resid..resid + 4].try_into().expect("4 bytes")),
+    })
+}
