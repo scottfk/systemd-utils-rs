@@ -12,6 +12,10 @@ name = "udev_helpers"
 path = "src/lib.rs"
 
 [[bin]]
+name = "dmi_memory_id"
+path = "src/bin/dmi_memory_id.rs"
+
+[[bin]]
 name = "fido_id"
 path = "src/bin/fido_id.rs"
 

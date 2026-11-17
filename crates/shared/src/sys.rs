@@ -2433,3 +2433,17 @@ pub fn gnu_get_libc_version() -> Vec<u8> {
     // SAFETY: glibc returns a static NUL-terminated string.
     unsafe { CStr::from_ptr(gnu_get_libc_version_raw()) }.to_bytes().to_vec()
 }
+
+/// `printf("%g")` (or `"%.Ng"` with a precision) of `v`, by libc.
+pub fn format_g(v: f64, precision: Option<i32>) -> Vec<u8> {
+    let mut buf = [0u8; 64];
+    // SAFETY: buf is valid for its length; the formats take one double
+    // (and an int precision), which is what is passed.
+    let n = unsafe {
+        match precision {
+            None => libc::snprintf(buf.as_mut_ptr().cast(), buf.len(), c"%g".as_ptr(), v),
+            Some(p) => libc::snprintf(buf.as_mut_ptr().cast(), buf.len(), c"%.*g".as_ptr(), p, v),
+        }
+    };
+    buf[..(n.max(0) as usize).min(buf.len() - 1)].to_vec()
+}

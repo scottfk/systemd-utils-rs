@@ -39,11 +39,10 @@ pub fn parse_common_argv(argv: Vec<Vec<u8>>, cmd: &Command) -> Result<Vec<Vec<u8
     Ok(opts.args().to_vec())
 }
 
-/// `printf()` to stdout.
+/// `printf()` to stdout, buffered as C's stdio buffers it.
 #[macro_export]
 macro_rules! out {
-    ($($e:expr),* $(,)?) => {{
-        use std::io::Write as _;
-        let _ = std::io::stdout().write_all(&shared::bcat!($($e),*));
-    }};
+    ($($e:expr),* $(,)?) => {
+        shared::printo!($($e),*)
+    };
 }
