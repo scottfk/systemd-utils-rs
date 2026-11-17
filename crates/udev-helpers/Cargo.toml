@@ -46,3 +46,7 @@ workspace = true
 [[bin]]
 name = "scsi_id"
 path = "src/bin/scsi_id.rs"
+
+[[bin]]
+name = "cdrom_id"
+path = "src/bin/cdrom_id.rs"

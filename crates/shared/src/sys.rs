@@ -2465,6 +2465,9 @@ pub struct SgStatus {
     pub msg_status: u32,
     /// The sense bytes written: v3 sb_len_wr, v4 response_len.
     pub sense_len: u32,
+    /// v3: info and masked_status; v4: 0.
+    pub info: u32,
+    pub masked_status: u32,
 }
 
 /// `ioctl(fd, SG_IO, &io_v4)` with a `struct sg_io_v4` for a SCSI command
@@ -2495,6 +2498,8 @@ pub fn sg_io_v4(fd: Fd, cdb: &[u8], sense: &mut [u8], data: &mut [u8], timeout_m
         resid: get32(136) as i32,
         msg_status: 0,
         sense_len: get32(132),
+        info: 0,
+        masked_status: 0,
     })
 }
 
@@ -2509,11 +2514,26 @@ pub fn sg_io_v3(
     dir: i32,
     timeout_ms: u32,
 ) -> Result<SgStatus, i32> {
+    sg_io_v3_full(fd, cdb, sense, data, dir, 0, timeout_ms)
+}
+
+/// [`sg_io_v3`] with the request's `flags` (SG_FLAG_*).
+pub fn sg_io_v3_full(
+    fd: Fd,
+    cdb: &[u8],
+    sense: &mut [u8],
+    data: &mut [u8],
+    dir: i32,
+    flags: u32,
+    timeout_ms: u32,
+) -> Result<SgStatus, i32> {
+    // (size, dxferp, cmdp, sbp, timeout, status, host_status,
+    // driver_status, info); flags follows timeout.
     #[cfg(target_pointer_width = "64")]
-    const L: (usize, usize, usize, usize, usize, usize, usize, usize) = (88, 16, 24, 32, 40, 64, 68, 70);
+    const L: (usize, usize, usize, usize, usize, usize, usize, usize, usize) = (88, 16, 24, 32, 40, 64, 68, 70, 80);
     #[cfg(target_pointer_width = "32")]
-    const L: (usize, usize, usize, usize, usize, usize, usize, usize) = (64, 16, 20, 24, 28, 44, 48, 50);
-    let (size, dxferp, cmdp, sbp, timeout, status, host, driver) = L;
+    const L: (usize, usize, usize, usize, usize, usize, usize, usize, usize) = (64, 16, 20, 24, 28, 44, 48, 50, 60);
+    let (size, dxferp, cmdp, sbp, timeout, status, host, driver, info) = L;
     let mut io = vec![0u8; size];
     io[0..4].copy_from_slice(&(b'S' as i32).to_ne_bytes());
     io[4..8].copy_from_slice(&dir.to_ne_bytes());
@@ -2528,6 +2548,7 @@ pub fn sg_io_v3(
     ptr(&mut io, cmdp, cdb.as_ptr() as usize);
     ptr(&mut io, sbp, sense.as_mut_ptr() as usize);
     io[timeout..timeout + 4].copy_from_slice(&timeout_ms.to_ne_bytes());
+    io[timeout + 4..timeout + 8].copy_from_slice(&flags.to_ne_bytes());
     // SAFETY: io is a struct sg_io_hdr whose pointers refer to cdb (read
     // only), sense and data, all valid for the lengths given and
     // exclusively borrowed for the call.
@@ -2543,5 +2564,7 @@ pub fn sg_io_v3(
         resid: i32::from_ne_bytes(io[resid..resid + 4].try_into().expect("4 bytes")),
         msg_status: io[status + 2] as u32,
         sense_len: io[status + 3] as u32,
+        info: u32::from_ne_bytes(io[info..info + 4].try_into().expect("4 bytes")),
+        masked_status: io[status + 1] as u32,
     })
 }
