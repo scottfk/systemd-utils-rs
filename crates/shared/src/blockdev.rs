@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 //! The parts of `blockdev-util.c`, `reread-partition-table.c` and
 //! `sd-device.c` that udevd uses on block devices.
-//!
-//! Known difference: there is no libblkid, so `reread_partition_table()`
-//! always takes C's no-libblkid path (BLKRRPART), also for GPT disks
-//! where C would add, resize and remove partitions one by one.
 
 use crate::device_enumerator::Enumerator;
 use crate::errno::strerror;
@@ -298,8 +294,339 @@ fn reread_partition_table_full(dev: &Dev, fd: i32, flags: u32) -> i32 {
         }
         Ok(true) => {}
     }
-    log_device_debug!(dev, "We don't have libblkid, falling back to BLKRRPART on '", p.bytes(), "'.");
-    fallback_ioctl(dev, fd, flags)
+    let p = p.bytes().to_vec();
+    match crate::sys_blkid::dlopen_libblkid(crate::log::LOG_DEBUG) {
+        Err(r) if crate::errno::errno_is_neg_not_supported(r) => {
+            log_device_debug!(dev, "We don't have libblkid, falling back to BLKRRPART on '", &p[..], "'.");
+            return fallback_ioctl(dev, fd, flags);
+        }
+        Err(r) => return log_device_debug_errno!(dev, r, "Failed to load libblkid: ", strerror(r)),
+        Ok(()) => {}
+    }
+    let neg = |e: i32, fallback: i32| if e > 0 { -e } else { -fallback };
+    let b = match crate::sys_blkid::Probe::new() {
+        Ok(b) => b,
+        Err(_) => return log_debug_errno!(-libc::ENOMEM, "Out of memory."),
+    };
+    if let Err(e) = b.set_device_range(fd, 0, 0) {
+        let r = neg(e, libc::ENOMEM);
+        return log_device_debug_errno!(dev, r, "Failed to open block device '", &p[..], "': ", strerror(r));
+    }
+    b.enable_partitions(true);
+    b.set_partitions_flags(crate::sys_blkid::BLKID_PARTS_ENTRY_DETAILS);
+    let (rc, e) = b.do_safeprobe();
+    match rc {
+        -1 => {
+            let r = neg(e, libc::EIO);
+            return log_device_debug_errno!(
+                dev,
+                r,
+                "Unable to probe for partition table of '",
+                &p[..],
+                "': ",
+                strerror(r)
+            );
+        }
+        -2 | 1 => {
+            log_device_debug!(
+                dev,
+                "Didn't find partition table on block device '",
+                &p[..],
+                "', falling back to BLKRRPART."
+            );
+            return fallback_ioctl(dev, fd, flags);
+        }
+        _ => {}
+    }
+    if b.lookup_value(b"PTTYPE").as_deref() != Some(b"gpt") {
+        log_device_debug!(dev, "Didn't find a GPT partition table on '", &p[..], "', falling back to BLKRRPART.");
+        return fallback_ioctl(dev, fd, flags);
+    }
+    let pl = match b.partitions() {
+        Ok(pl) => pl,
+        Err(e) => {
+            let r = neg(e, libc::EIO);
+            return log_device_debug_errno!(dev, r, "Unable to read partition table of '", &p[..], "': ", strerror(r));
+        }
+    };
+    sys::set_errno(0);
+    let n_partitions = pl.len();
+    if n_partitions < 0 {
+        let r = crate::errno::errno_or_else(libc::EIO);
+        return log_device_debug_errno!(
+            dev,
+            r,
+            "Unable to acquire number of entries in partition table of '",
+            &p[..],
+            "': ",
+            strerror(r)
+        );
+    }
+    let mut e = match partition_enumerator_new(dev) {
+        Ok(e) => e,
+        Err(r) => {
+            return log_device_debug_errno!(dev, r, "Failed to enumerate kernel partition devices: ", strerror(r));
+        }
+    };
+    log_device_debug!(dev, "Updating/adding kernel partition devices...");
+    let mut found = Vec::new();
+    let mut changed = false;
+    let mut ret = 0;
+    for i in 0..n_partitions {
+        sys::set_errno(0);
+        let Some(pp) = pl.get(i) else {
+            let r = crate::errno::errno_or_else(libc::EIO);
+            return log_device_debug_errno!(
+                dev,
+                r,
+                format!("Unable to get partition data of partition {i} of partition table of '"),
+                &p[..],
+                "': ",
+                strerror(r)
+            );
+        };
+        let r = process_partition(dev, fd, pp, &mut found, flags, &mut changed);
+        crate::errno::ret_gather(&mut ret, r);
+    }
+    if ret < 0 {
+        return ret;
+    }
+    log_device_debug!(dev, "Removing old kernel partition devices...");
+    let r = remove_partitions(dev, fd, &mut e, &found, &mut changed);
+    if r < 0 {
+        return r;
+    }
+    if changed {
+        return 1;
+    }
+    if flags & REREADPT_FORCE_UEVENT != 0
+        && let Err(r) = sd_device_trigger(dev, Action::Change)
+    {
+        return log_device_debug_errno!(
+            dev,
+            r,
+            "Failed to issue 'change' uevent on device '",
+            &p[..],
+            "': ",
+            strerror(r)
+        );
+    }
+    0
+}
+
+/// `process_partition()`.
+fn process_partition(
+    d: &Dev,
+    fd: i32,
+    pp: crate::sys_blkid::Partition,
+    partnos: &mut Vec<i32>,
+    flags: u32,
+    changed: &mut bool,
+) -> i32 {
+    let node = match d.get_devname() {
+        Ok(n) => n.bytes().to_vec(),
+        Err(r) => return log_device_debug_errno!(d, r, "Failed to acquire device node path: ", strerror(r)),
+    };
+    let or_eio = |e: i32| if e > 0 { -e } else { -libc::EIO };
+    let (nr, e) = pp.partno();
+    if nr < 0 {
+        let r = or_eio(e);
+        return log_debug_errno!(r, "Failed to read partition number of partition: ", strerror(r));
+    }
+    log_device_debug!(d, format!("Processing partition {nr}..."));
+    let (start, e) = pp.start();
+    if start < 0 {
+        let r = or_eio(e);
+        return log_debug_errno!(r, format!("Failed to read partition start offset of partition {nr}: "), strerror(r));
+    }
+    let (size, e) = pp.size();
+    if size < 0 {
+        let r = or_eio(e);
+        return log_debug_errno!(r, format!("Failed to read partition size of partition {nr}: "), strerror(r));
+    }
+    let (start, size) = (start as u64, size as u64);
+    if !partnos.contains(&nr) {
+        partnos.push(nr);
+    }
+    let subnode = crate::dissect::partition_node_of(&node, nr);
+    match Device::new_from_devname(&subnode) {
+        Err(r) if r != -libc::ENODEV => {
+            return log_device_debug_errno!(d, r, "Failed to acquire device '", &subnode[..], "': ", strerror(r));
+        }
+        Err(_) => {}
+        Ok(partition) => {
+            let start_kernel = match partition.get_sysattr_u64(b"start") {
+                Ok(v) => v,
+                Err(r) => {
+                    return log_device_debug_errno!(
+                        &partition,
+                        r,
+                        "Failed to get start of kernel partition device '",
+                        &subnode[..],
+                        "': ",
+                        strerror(r)
+                    );
+                }
+            };
+            let size_kernel = match partition.get_sysattr_u64(b"size") {
+                Ok(v) => v,
+                Err(r) => {
+                    return log_device_debug_errno!(
+                        &partition,
+                        r,
+                        "Failed to get size of kernel partition device '",
+                        &subnode[..],
+                        "': ",
+                        strerror(r)
+                    );
+                }
+            };
+            if start_kernel == start && size_kernel == size {
+                log_device_debug!(
+                    &partition,
+                    "Kernel partition device '",
+                    &subnode[..],
+                    "' already matches partition table, not modifying."
+                );
+                if flags & REREADPT_FORCE_UEVENT != 0 {
+                    if !*changed {
+                        if let Err(r) = sd_device_trigger(d, Action::Change) {
+                            return log_device_debug_errno!(
+                                d,
+                                r,
+                                "Failed to issue 'change' uevent on device '",
+                                &node[..],
+                                "': ",
+                                strerror(r)
+                            );
+                        }
+                        log_device_debug!(d, "Successfully issued 'change' uevent on device '", &node[..], "'.");
+                        *changed = true;
+                    }
+                    if let Err(r) = sd_device_trigger(&partition, Action::Change) {
+                        return log_device_debug_errno!(
+                            &partition,
+                            r,
+                            "Failed to issue 'change' uevent on partition '",
+                            &subnode[..],
+                            "': ",
+                            strerror(r)
+                        );
+                    }
+                    log_device_debug!(
+                        &partition,
+                        "Successfully issued 'change' uevent on partition '",
+                        &subnode[..],
+                        "'."
+                    );
+                }
+                return 0;
+            }
+            if start_kernel == start {
+                log_device_debug!(&partition, format!("Resizing partition {nr}..."));
+                if let Err(r) = sys::blkpg(fd, sys::BLKPG_RESIZE_PARTITION, nr, start * 512, size * 512) {
+                    return log_device_debug_errno!(
+                        &partition,
+                        r,
+                        "Failed to resize kernel partition device '",
+                        &subnode[..],
+                        "' to partition table values: ",
+                        strerror(r)
+                    );
+                }
+                log_device_debug!(
+                    &partition,
+                    "Successfully resized kernel partition device '",
+                    &subnode[..],
+                    "' to match partition table."
+                );
+                *changed = true;
+                return 1;
+            }
+            log_device_debug!(&partition, format!("Removing and recreating partition {nr}..."));
+            drop(partition);
+            if let Err(r) = sys::blkpg(fd, sys::BLKPG_DEL_PARTITION, nr, 0, 0) {
+                return log_device_debug_errno!(
+                    d,
+                    r,
+                    "Failed to remove kernel partition device '",
+                    &subnode[..],
+                    "' in order to recreate it: ",
+                    strerror(r)
+                );
+            }
+            log_device_debug!(
+                d,
+                "Successfully removed kernel partition device '",
+                &subnode[..],
+                "' in order to recreate it."
+            );
+        }
+    }
+    log_device_debug!(d, format!("Adding partition {nr}..."));
+    if let Err(r) = sys::blkpg(fd, sys::BLKPG_ADD_PARTITION, nr, start * 512, size * 512) {
+        return log_device_debug_errno!(
+            d,
+            r,
+            format!("Failed to add kernel partition device {nr} to partition table values: "),
+            strerror(r)
+        );
+    }
+    log_device_debug!(d, format!("Successfully added kernel partition device {nr} to match partition table."));
+    *changed = true;
+    1
+}
+
+/// `remove_partitions()`: removes the kernel's partitions of `d` that
+/// aren't in `partnos`.
+fn remove_partitions(d: &Dev, fd: i32, e: &mut Enumerator, partnos: &[i32], changed: &mut bool) -> i32 {
+    let mut ret = 0;
+    let devices = if e.scan_devices() < 0 { Vec::new() } else { e.get_devices().unwrap_or_default() };
+    for partition in &devices {
+        let devname = match partition.get_devname() {
+            Ok(n) => n.bytes().to_vec(),
+            Err(r) => {
+                return log_device_debug_errno!(partition, r, "Failed to get name of partition: ", strerror(r));
+            }
+        };
+        let nr = match partition.get_property_uint(b"PARTN") {
+            Ok(n) => n,
+            Err(r) => {
+                return log_device_debug_errno!(
+                    partition,
+                    r,
+                    "Failed to read partition number property: ",
+                    strerror(r)
+                );
+            }
+        };
+        if partnos.contains(&(nr as i32)) {
+            log_device_debug!(
+                partition,
+                format!("Found kernel partition device {nr} in partition table, leaving around.")
+            );
+            continue;
+        }
+        log_device_debug!(partition, format!("Kernel knows partition {nr} which we didn't find, removing."));
+        match sys::blkpg(fd, sys::BLKPG_DEL_PARTITION, nr as i32, 0, 0) {
+            Err(r) => crate::errno::ret_gather(
+                &mut ret,
+                log_device_debug_errno!(
+                    d,
+                    r,
+                    "Failed to remove kernel partition device '",
+                    &devname[..],
+                    "' that vanished from partition table: ",
+                    strerror(r)
+                ),
+            ),
+            Ok(()) => {
+                log_device_debug!(d, format!("Removed partition {nr} from kernel."));
+                *changed = true;
+            }
+        }
+    }
+    ret
 }
 
 /// `reread_partition_table(dev, flags)`.

@@ -2568,3 +2568,36 @@ pub fn sg_io_v3_full(
         masked_status: io[status + 1] as u32,
     })
 }
+
+/// `BLKPG_ADD_PARTITION`, `BLKPG_DEL_PARTITION`, `BLKPG_RESIZE_PARTITION`.
+pub const BLKPG_ADD_PARTITION: i32 = 1;
+pub const BLKPG_DEL_PARTITION: i32 = 2;
+pub const BLKPG_RESIZE_PARTITION: i32 = 3;
+
+/// `ioctl(fd, BLKPG, &ba)` with a `struct blkpg_partition` of partition
+/// `pno` at byte offset `start`, `length` bytes long.
+pub fn blkpg(fd: Fd, op: i32, pno: i32, start: u64, length: u64) -> Result<(), i32> {
+    const BLKPG: u64 = 0x1269;
+    // struct blkpg_partition: start, length (long long), pno (int),
+    // devname[64], volname[64]; 152 bytes on x86-64, 148 on i686.
+    #[cfg(target_pointer_width = "64")]
+    const PART: usize = 152;
+    #[cfg(target_pointer_width = "32")]
+    const PART: usize = 148;
+    let mut bp = [0u8; PART];
+    bp[0..8].copy_from_slice(&start.to_ne_bytes());
+    bp[8..16].copy_from_slice(&length.to_ne_bytes());
+    bp[16..20].copy_from_slice(&pno.to_ne_bytes());
+    // struct blkpg_ioctl_arg: op, flags, datalen (int), data (pointer).
+    let mut ba = [0u8; 8 + 2 * std::mem::size_of::<usize>()];
+    let data_off = ba.len() - std::mem::size_of::<usize>();
+    ba[0..4].copy_from_slice(&op.to_ne_bytes());
+    ba[8..12].copy_from_slice(&(PART as i32).to_ne_bytes());
+    ba[data_off..].copy_from_slice(&(bp.as_mut_ptr() as usize).to_ne_bytes());
+    // SAFETY: ba is a struct blkpg_ioctl_arg whose data pointer refers to
+    // bp, valid and exclusively borrowed for the call.
+    if unsafe { libc::ioctl(fd, BLKPG as _, ba.as_mut_ptr()) } < 0 {
+        return Err(neg_errno());
+    }
+    Ok(())
+}

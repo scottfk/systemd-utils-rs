@@ -362,7 +362,7 @@ fn compare_arch(a: Option<&str>, b: Option<&str>) -> std::cmp::Ordering {
 }
 
 /// `partition_node_of(node, nr, &ret)`.
-fn partition_node_of(node: &[u8], nr: i32) -> Vec<u8> {
+pub(crate) fn partition_node_of(node: &[u8], nr: i32) -> Vec<u8> {
     let (dir, file) = match node.iter().rposition(|&c| c == b'/') {
         Some(i) => (Some(&node[..i + 1]), &node[i + 1..]),
         None => (None, node),
