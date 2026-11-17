@@ -42,3 +42,7 @@ udevadm = { path = "../udevadm" }
 
 [lints]
 workspace = true
+
+[[bin]]
+name = "scsi_id"
+path = "src/bin/scsi_id.rs"

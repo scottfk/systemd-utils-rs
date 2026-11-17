@@ -2461,6 +2461,10 @@ pub struct SgStatus {
     pub c: u32,
     /// v3: the residual count (`resid`); v4: din_resid.
     pub resid: i32,
+    /// v3: msg_status; v4: 0.
+    pub msg_status: u32,
+    /// The sense bytes written: v3 sb_len_wr, v4 response_len.
+    pub sense_len: u32,
 }
 
 /// `ioctl(fd, SG_IO, &io_v4)` with a `struct sg_io_v4` for a SCSI command
@@ -2484,7 +2488,14 @@ pub fn sg_io_v4(fd: Fd, cdb: &[u8], sense: &mut [u8], data: &mut [u8], timeout_m
         return Err(neg_errno());
     }
     let get32 = |o: usize| u32::from_ne_bytes(io[o..o + 4].try_into().expect("4 bytes"));
-    Ok(SgStatus { a: get32(116), b: get32(112), c: get32(108), resid: get32(136) as i32 })
+    Ok(SgStatus {
+        a: get32(116),
+        b: get32(112),
+        c: get32(108),
+        resid: get32(136) as i32,
+        msg_status: 0,
+        sense_len: get32(132),
+    })
 }
 
 /// `ioctl(fd, SG_IO, &io_hdr)` with a `struct sg_io_hdr` (version 3)
@@ -2530,5 +2541,7 @@ pub fn sg_io_v3(
         b: u16::from_ne_bytes([io[host], io[host + 1]]) as u32,
         c: u16::from_ne_bytes([io[driver], io[driver + 1]]) as u32,
         resid: i32::from_ne_bytes(io[resid..resid + 4].try_into().expect("4 bytes")),
+        msg_status: io[status + 2] as u32,
+        sense_len: io[status + 3] as u32,
     })
 }
