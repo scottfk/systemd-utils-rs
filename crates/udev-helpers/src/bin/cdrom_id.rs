@@ -601,7 +601,7 @@ fn cd_media_toc(c: &mut Context) -> i32 {
 
 /// `open_drive()`.
 fn open_drive(c: &mut Context, node: &[u8]) -> i32 {
-    // As upstream, cnt is incremented twice per failed attempt, so an
+    // QUIRK: as upstream, cnt is incremented twice per failed attempt, so an
     // EBUSY device is tried 11 times rather than 20.
     let mut cnt = 0;
     let fd = loop {

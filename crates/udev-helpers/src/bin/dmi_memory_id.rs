@@ -157,6 +157,8 @@ fn device_voltage(suffix: &str, slot: u32, code: u16) {
         return;
     }
     let v = code as f64 / 1000.0;
+    // QUIRK: whole tenths print with %.1g, one significant digit (1.2 V is
+    // "1"); see QUIRKS.md.
     let s = if !code.is_multiple_of(100) { sys::format_g(v, None) } else { sys::format_g(v, Some(1)) };
     out!(format!("MEMORY_DEVICE_{slot}_{suffix}="), &s[..], "\n");
 }
