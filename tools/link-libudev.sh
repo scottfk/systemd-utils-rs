@@ -2,6 +2,7 @@
 # link-libudev.sh - link libudev.so.1 from the libudev crate's static library
 #
 # 20261116 - Created by Claude (claude.ai, Anthropic) - scottfk
+# 20261120 - CC may carry flags (multilib's "gcc -m32"), split into words - Claude - scottfk
 #
 # Usage: tools/link-libudev.sh [--target TRIPLE] [--release] [OUTDIR]
 #
@@ -17,7 +18,8 @@
 #
 # OUTDIR defaults to target/[TRIPLE/]{debug,release}/libudev.
 #
-# CC (default cc), CARGO (default cargo) and LDFLAGS are honored.
+# CC (default cc, may include flags), CARGO (default cargo) and LDFLAGS
+# are honored.
 
 set -euo pipefail
 
@@ -52,8 +54,9 @@ esac
 
 outdir=${outdir:-$tdir/libudev}
 mkdir -p "$outdir"
+read -r -a cc <<< "${CC:-cc}"
 # shellcheck disable=SC2086 # LDFLAGS is a list of words
-"${CC:-cc}" "${m[@]}" -shared -o "$outdir/libudev.so.1.7.15.tmp" \
+"${cc[@]}" "${m[@]}" -shared -o "$outdir/libudev.so.1.7.15.tmp" \
     -Wl,--whole-archive "$tdir/libudev.a" -Wl,--no-whole-archive \
     -Wl,--gc-sections -Wl,--as-needed \
     -Wl,--version-script="$top/crates/libudev/libudev.sym" \
