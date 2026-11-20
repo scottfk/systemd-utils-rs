@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+	<maintainer type="person">
+		<email>scottfk@gmail.com</email>
+	</maintainer>
+	<longdescription>
+		sys-apps/systemd-utils 262 with every program and library replaced
+		by systemd-utils-rs, a strict-compatibility Rust port: udevadm and
+		udevd, systemd-hwdb, systemd-tmpfiles, systemd-sysctl, the udev
+		helpers and libudev for each ABI.  Rules, hwdb sources, man pages,
+		headers and pkg-config files are upstream v262's, installed as
+		sys-apps/systemd-utils-262 installs them.
+	</longdescription>
+	<use>
+		<flag name="sysctl">Install the systemd-sysctl utility</flag>
+		<flag name="tmpfiles">Install the systemd-tmpfiles utility</flag>
+		<flag name="udev">Install the udev daemon, udevadm, the helpers and libudev</flag>
+	</use>
+	<upstream>
+		<remote-id type="github">scottfk/systemd-utils-rs</remote-id>
+		<remote-id type="github">systemd/systemd</remote-id>
+	</upstream>
+</pkgmetadata>

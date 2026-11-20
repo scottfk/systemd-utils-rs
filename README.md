@@ -26,8 +26,8 @@ A drop-in port/reimplementation of Gentoo's systemd-utils (udev, libudev, hwdb, 
 
 ## Status
 
-Phases 1 to 6 are done: `systemd-sysctl`, `systemd-tmpfiles`,
-`systemd-hwdb` and `libudev.so.1` (both ABIs) are ported, along with the
+All eight phases are done.  The first four port `systemd-sysctl`,
+`systemd-tmpfiles`, `systemd-hwdb` and `libudev.so.1` (both ABIs), along with the
 shared code the later phases build on (see the layout below). 330 sysctl,
 893 tmpfiles and 187 hwdb differential cases match the C build, and
 compiling the installed `hwdb.d` gives a `hwdb.bin` byte-identical to the C
@@ -109,6 +109,26 @@ restoring the initramfs udevd's watches, and hwdb.bin (14 MB) was read
 into memory instead of mapped, which also delayed udevd's rules load
 enough to flip the `/dev/root` race described above.
 
+Phase 8 (done, branch `phase8-ebuild`) packages the port for Gentoo:
+[contrib/gentoo/sys-apps/systemd-utils](contrib/gentoo/sys-apps/systemd-utils)
+is `systemd-utils-262_p9999`, a drop-in for `sys-apps/systemd-utils-262`
+(see [Installing on Gentoo](#installing-on-gentoo)).  It configures, builds
+and installs upstream's v262 exactly as Gentoo's ebuild does, then puts
+the port's programs and libudev (for each ABI) in place of C's; the build
+fails if any installed ELF file is not Rust's.  In the VM rehearsal, it
+installed over C 262 (with `abi_x86_32`, as on hydra):
+- **Files:** the same files as C 262's package. The exceptions are
+  `libsystemd-shared-262.so`, which only C's programs linked, and the
+  port's README and QUIRKS among the docs.
+- **ELF files:** all 14 are Rust's, needing only libc (and libgcc_s).
+- **libudev:** the same 98 dynamic symbols and soname as C on both ABIs.
+- **Boot:** the guest booted on it, then went back to C 262 from a binary
+  package with `emerge -1K`.
+- **Comparison:** the Rust and C boots give the same `/dev`,
+  `/run/udev`, watches, modules, links and services, the same
+  partition-table reread results, and the same udev database apart from
+  hash order.
+
 The reference is upstream's tag `v262` (its sources are the same as the release
 tarball's), built as Gentoo builds it ([tools/build-reference.sh](tools/build-reference.sh)):
 
@@ -120,6 +140,29 @@ tarball's), built as Gentoo builds it ([tools/build-reference.sh](tools/build-re
 The build matches the installed package: the same `--version` feature string, the
 same 12 programs, the same exported libudev symbols on both ABIs (92 functions in
 6 version nodes, `LIBUDEV_183` to `LIBUDEV_247`) and the same linked libraries.
+
+## Installing on Gentoo
+
+The ebuild is live (it builds the port from this repository's `main`), so
+it has no keywords and is pinned to the v262 it ports.  As root, with the
+ebuild in a local repository (here `localrepo`):
+
+```sh
+cp -r contrib/gentoo/sys-apps/systemd-utils /var/db/repos/localrepo/sys-apps/
+echo '=sys-apps/systemd-utils-262_p9999 **' > /etc/portage/package.accept_keywords/systemd-utils
+echo '>sys-apps/systemd-utils-262_p9999' > /etc/portage/package.mask/systemd-utils
+quickpkg --include-config=y sys-apps/systemd-utils   # C's package, to go back to
+emerge -1 =sys-apps/systemd-utils-262_p9999
+```
+
+udev runs from early boot, so keep the binary package of the C build: it
+puts C back without compiling, even from a rescue shell (`emerge -1K
+=sys-apps/systemd-utils-262`; `emerge -1 =sys-apps/systemd-utils-262`
+builds it again).  The running udevd keeps the old program until it is
+restarted (`rc-service udev restart`) or the machine reboots.  The flags
+`acl` and `kmod` are always on, and `boot`, `kernel-install`, `sysusers`
+and `ukify` are not offered: the port covers the udev, tmpfiles and sysctl
+parts, built as hydra builds them.
 
 ## Layout
 
@@ -314,7 +357,7 @@ then runs the test suites (so far, the differential cases of phases 1 to 6):
    `net_id`, `net_setup_link` (`.link` files), `path_id`, `uaccess`, `usb_id` and the
    rest, plus the eight helper programs in `/usr/lib/udev`; probed as root on the VM's
    drives, and whole boots compared with C v262's.
-8. **Packaging:** a Gentoo ebuild (a `sys-apps/systemd-utils` drop-in), with a VM
+8. **Packaging (done, branch `phase8-ebuild`):** a Gentoo ebuild (a `sys-apps/systemd-utils` drop-in), with a VM
    rehearsal and a rollback through a binary package of the C build.
 
 ## Contributing
