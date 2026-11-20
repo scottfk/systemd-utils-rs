@@ -1186,6 +1186,59 @@ pub fn munmap(addr: usize, size: usize) {
     unsafe { libc::munmap(addr as *mut c_void, size) };
 }
 
+/// A read-only `MAP_SHARED` mapping of a whole file, as `sd-hwdb.c` maps
+/// hwdb.bin: unmapped when dropped.
+pub struct Mmap {
+    ptr: *const u8,
+    len: usize,
+}
+
+// SAFETY: the mapping is read-only and owned by this value alone; reading
+// it from several threads is fine.
+unsafe impl Send for Mmap {}
+// SAFETY: as above, &Mmap only hands out shared reads.
+unsafe impl Sync for Mmap {}
+
+impl Mmap {
+    /// `mmap(NULL, len, PROT_READ, MAP_SHARED, fd, 0)`.
+    pub fn map_readonly(fd: Fd, len: usize) -> Result<Mmap, i32> {
+        if len == 0 {
+            return Err(-libc::EINVAL);
+        }
+        // SAFETY: a new mapping at a kernel-chosen address; no existing
+        // memory is touched.
+        let p = unsafe { libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ, libc::MAP_SHARED, fd, 0) };
+        if p == libc::MAP_FAILED {
+            return Err(neg_errno());
+        }
+        Ok(Mmap { ptr: p as *const u8, len })
+    }
+}
+
+impl std::ops::Deref for Mmap {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        // SAFETY: ptr..ptr+len is our live PROT_READ mapping.  Like C, this
+        // trusts the file not to be truncated or rewritten in place while
+        // mapped: hwdb.bin is only ever replaced by rename().
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+impl Drop for Mmap {
+    fn drop(&mut self) {
+        // SAFETY: unmapping the region map_readonly() mapped; no slice of it
+        // outlives self.
+        unsafe { libc::munmap(self.ptr as *mut c_void, self.len) };
+    }
+}
+
+impl std::fmt::Debug for Mmap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Mmap({} bytes)", self.len)
+    }
+}
+
 /// `prctl(PR_SET_MM, what, value)`.
 pub fn prctl_set_mm(what: c_int, value: usize) -> Result<(), i32> {
     // SAFETY: PR_SET_MM only changes this process's mm fields; failure is reported.

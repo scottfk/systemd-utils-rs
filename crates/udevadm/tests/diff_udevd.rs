@@ -765,3 +765,84 @@ stop
 "#,
     );
 }
+
+/// Watches left by an earlier udevd (the initramfs one at boot): moved to
+/// watch.old, restored, and watch.old removed.  The VM found it left
+/// behind; a second start finds a stale watch.old too.
+#[test]
+fn watch_restore() {
+    check(
+        "watch_restore",
+        r#"
+mkdir -p /run/udev/watch /run/udev/watch.old/sub
+ln -s b999:0 /run/udev/watch/1
+ln -s 1 /run/udev/watch/b999:0
+ln -s 2 /run/udev/watch/n99999
+ln -s x /run/udev/watch.old/sub/stale
+start -c 1
+settle
+stop
+ls -A /run/udev
+mkdir -p /run/udev/watch
+ln -s 3 /run/udev/watch/c999:1
+start -c 1
+settle
+stop
+"#,
+    );
+}
+
+/// A module modules.dep lists that isn't loaded, spelled with dashes as a
+/// config would, or None.
+fn unloaded_module() -> Option<String> {
+    let rel = std::fs::read_to_string("/proc/sys/kernel/osrelease").ok()?;
+    let dep = std::fs::read_to_string(format!("/lib/modules/{}/modules.dep", rel.trim())).ok()?;
+    let loaded = std::fs::read_to_string("/proc/modules").ok()?;
+    let loaded: Vec<&str> = loaded.lines().filter_map(|l| l.split(' ').next()).collect();
+    let mut names: Vec<String> = dep
+        .lines()
+        .filter_map(|l| l.split(':').next())
+        .filter_map(|p| p.rsplit('/').next())
+        .filter_map(|f| f.split(".ko").next())
+        .map(|n| n.replace('-', "_"))
+        .filter(|n| n.contains('_') && !loaded.contains(&n.as_str()))
+        .collect();
+    names.sort();
+    names.into_iter().next().map(|n| n.replace('_', "-"))
+}
+
+/// The kmod builtin in a worker (test mode skips it): modules deny-listed
+/// in modprobe.d by name and through an alias, a plain insert (EPERM in
+/// the user namespace) and an unknown module.  The VM found the port
+/// ignoring the deny-list.
+#[test]
+fn kmod_denylist() {
+    let Some(m) = unloaded_module() else {
+        eprintln!("kmod_denylist: no unloaded module, skipping");
+        return;
+    };
+    check_env(
+        "kmod_denylist",
+        r#"
+mkdir -p /run/mpd
+for d in /etc/modprobe.d /usr/lib/modprobe.d /lib/modprobe.d /run/modprobe.d; do
+    [ -d "$d" ] && [ ! -L "$d" ] && mount --bind /run/mpd "$d"
+done
+echo "SUBSYSTEM==\"net\", ACTION==\"add\", RUN{builtin}+=\"kmod load $M nosuch-module\"" > /run/udev/rules.d/50-t.rules
+echo 'SUBSYSTEM=="net", ACTION=="change", RUN{builtin}+="kmod load sdu-test-alias"' >> /run/udev/rules.d/50-t.rules
+start -c 1
+link k0 k1
+settle
+echo "blacklist $M" > /run/mpd/deny.conf
+echo "alias sdu-test-alias $M" >> /run/mpd/deny.conf
+"$U" control -R
+quiet
+echo change > /sys/class/net/k0/uevent
+settle
+link k2 k3
+settle
+stop
+"#,
+        &[("M", &m)],
+    );
+}

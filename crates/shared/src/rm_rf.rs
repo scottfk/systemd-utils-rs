@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
-//! `rm-rf.c`: the parts tmpfiles uses (`rm_rf_child()`, `rm_rf_children()`
-//! and the `*_harder()` helpers).
+//! `rm-rf.c`: `rm_rf_at()`, `rm_rf_safe()`, `rm_rf_child()`,
+//! `rm_rf_children()` and the `*_harder()` helpers.
 
 use crate::btrfs::{BTRFS_REMOVE_QUOTA, BTRFS_REMOVE_RECURSIVE, might_be_subvol, subvol_remove_at};
 use crate::fd::fd_get_path;
@@ -275,4 +275,97 @@ pub fn rm_rf_child(fd: Fd, name: &[u8], flags: u32) -> Result<bool, i32> {
         return Err(-libc::EINVAL);
     }
     rm_rf_inner_child(fd, name, None, flags, None, true)
+}
+
+/// `rm_rf_at(dir_fd, path, flags)`.
+pub fn rm_rf_at(dir_fd: Fd, path: &[u8], flags: u32) -> Result<(), i32> {
+    if flags & (REMOVE_ONLY_DIRECTORIES | REMOVE_SUBVOLUME) == REMOVE_ONLY_DIRECTORIES | REMOVE_SUBVOLUME {
+        return Err(-libc::EINVAL);
+    }
+    // Never the root file system.
+    let r = match crate::fd::path_is_root_at(dir_fd, path) {
+        Err(e) if e == -libc::ENOENT => {
+            sys::faccessat(dir_fd, path, libc::F_OK, libc::AT_SYMLINK_NOFOLLOW).map(|()| false)
+        }
+        x => x,
+    };
+    match r {
+        Err(e) if e == -libc::ENOENT && flags & REMOVE_MISSING_OK != 0 => return Ok(()),
+        Err(e) => {
+            let lvl = if e == -libc::ENOENT { crate::log::LOG_DEBUG } else { crate::log::LOG_ERR };
+            let p = String::from_utf8_lossy(path).into_owned();
+            return Err(crate::log_full_errno!(
+                lvl,
+                e,
+                "Failed to determine whether '",
+                p,
+                "' is the root file system: ",
+                crate::errno::strerror(e)
+            ));
+        }
+        Ok(true) => {
+            return Err(crate::log_error_errno!(
+                -libc::EPERM,
+                "Attempted to remove entire root file system, and we can't allow that."
+            ));
+        }
+        Ok(false) => {}
+    }
+    let all = REMOVE_SUBVOLUME | REMOVE_ROOT | REMOVE_PHYSICAL;
+    if flags & all == all {
+        match subvol_remove_at(dir_fd, path, BTRFS_REMOVE_RECURSIVE | BTRFS_REMOVE_QUOTA) {
+            Ok(()) => return Ok(()),
+            Err(e) if e == -libc::ENOENT && flags & REMOVE_MISSING_OK != 0 => return Ok(()),
+            Err(e) if ![-libc::ENOTTY, -libc::EINVAL, -libc::ENOTDIR, -libc::EPERM, -libc::EACCES].contains(&e) => {
+                return Err(e);
+            }
+            Err(_) => {}
+        }
+    }
+    if flags & (REMOVE_ROOT | REMOVE_PHYSICAL) == REMOVE_ROOT | REMOVE_PHYSICAL
+        && sys::unlinkat(dir_fd, path, libc::AT_REMOVEDIR).is_ok()
+    {
+        return Ok(());
+    }
+    let (r, q) = match openat_harder(dir_fd, path, SUBDIR_FLAGS, flags) {
+        Ok((fd, old_mode)) => {
+            let r = rm_rf_children_impl(fd, flags, None, old_mode);
+            let q = if flags & REMOVE_ROOT != 0 { sys::unlinkat(dir_fd, path, libc::AT_REMOVEDIR) } else { Ok(()) };
+            (r, q)
+        }
+        Err(r) => {
+            if flags & REMOVE_MISSING_OK != 0 && r == -libc::ENOENT {
+                return Ok(());
+            }
+            if r != -libc::ENOTDIR && r != -libc::ELOOP {
+                return Err(r);
+            }
+            if flags & REMOVE_ONLY_DIRECTORIES != 0 || flags & REMOVE_ROOT == 0 {
+                return Ok(());
+            }
+            if flags & REMOVE_PHYSICAL == 0 {
+                let s = crate::stat_util::xstatfsat(dir_fd, Some(path))?;
+                if is_physical_fs(&s) {
+                    let p = String::from_utf8_lossy(path).into_owned();
+                    return Err(crate::log_error_errno!(
+                        -libc::EPERM,
+                        "Attempted to remove files from a disk file system under \"",
+                        p,
+                        "\", refusing."
+                    ));
+                }
+            }
+            (Ok(()), sys::unlinkat(dir_fd, path, 0))
+        }
+    };
+    r?;
+    match q {
+        Err(e) if e != -libc::ENOENT || flags & REMOVE_MISSING_OK == 0 => Err(e),
+        _ => Ok(()),
+    }
+}
+
+/// `rm_rf_safe(p)` (errno is not touched: the port has no errno to protect).
+pub fn rm_rf_safe(p: &[u8]) {
+    let _ = rm_rf_at(libc::AT_FDCWD, p, REMOVE_ROOT | REMOVE_MISSING_OK | REMOVE_CHMOD);
 }

@@ -18,7 +18,7 @@ type LogFn = unsafe extern "C" fn(*mut c_void, c_int, *const c_char, c_int, *con
 
 const KMOD_MODULE_BUILTIN: c_int = 0;
 const KMOD_MODULE_LIVE: c_int = 1;
-const KMOD_PROBE_APPLY_BLACKLIST: c_uint = 0x20;
+const KMOD_PROBE_APPLY_BLACKLIST: c_uint = 0x20000;
 const KMOD_RESOURCES_OK: c_int = 0;
 
 #[derive(Debug)]

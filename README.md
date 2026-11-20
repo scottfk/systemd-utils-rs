@@ -66,7 +66,7 @@ first gives the script time; without the builtins the Rust udevd read its
 rules earlier and picked the rule up at the next reload, after the root
 partition was processed.
 
-Phase 7 (in progress, branch `phase7-builtins`) ports every builtin and the
+Phase 7 (done, branch `phase7-builtins`) ports every builtin and the
 eight helper programs:
 
 - **Builtins:** `blkid` (libblkid `dlopen()`ed), `btrfs`, `dissect_image`
@@ -87,9 +87,27 @@ of them), every builtin matches C on upstream's fake sysfs through
 `udevadm test-builtin`, a udevd scenario renames interfaces through `.link`
 files, `dmi_memory_id` matches C and upstream's expected output on
 upstream's DMI dumps, and the helpers' command lines, failures and
-`scsi_id`'s config file match.  Still to do: the VM pass (the helpers and
-`blkid`, `dissect_image` and `uaccess` as root on real devices, the
-partition table reread, and the full boot comparison).
+`scsi_id`'s config file match.
+
+In the VM, as root on its SATA disk and CD drive and their SCSI generic
+nodes, all 98 probes match C v262: `ata_id`, `cdrom_id`, `scsi_id` (every
+page and SG version), `dmi_memory_id`, `iocost query`, and `udevadm
+test-builtin` and `udevadm test` on every block and SCSI generic device
+(devlinks compared as sets, since C's order is a hash order that changes
+from run to run).  A partition-table test rewrites a loop device's table
+behind the kernel's back ten times (GPT adds, resizes and deletes, with
+partitions busy or open, a DOS table, a wipe); the udevd inotify watch's
+reread gives the same uevents, kernel partitions and log lines as C.  For
+the boot comparison only udevadm and the helpers are swapped (the rules
+and hwdb stay the guest's): two C v262 boots and the Rust boot give the same
+`/dev`, symlinks, `/run/udev`, loaded modules, links and services, and the
+same database apart from hash order.  The VM pass found three bugs, each
+now covered by a host test: the `kmod` builtin ignored modprobe.d
+deny-lists (a wrong flag value; the guest loaded `snd_pcsp` and the sound
+stack, which C refuses), udevd left `/run/udev/watch.old` behind after
+restoring the initramfs udevd's watches, and hwdb.bin (14 MB) was read
+into memory instead of mapped, which also delayed udevd's rules load
+enough to flip the `/dev/root` race described above.
 
 The reference is upstream's tag `v262` (its sources are the same as the release
 tarball's), built as Gentoo builds it ([tools/build-reference.sh](tools/build-reference.sh)):
@@ -292,9 +310,10 @@ then runs the test suites (so far, the differential cases of phases 1 to 6):
    varlink, interface renaming, and `udevadm trigger`, `settle`, `control`, `monitor`,
    `wait`, `lock`; boot-tested in the VM (snapshot `systemd-utils-base`).  The full
    `/dev` and `/run/udev` comparison of whole boots comes with the builtins.
-7. **Builtins and helpers (in progress, branch `phase7-builtins`):** `blkid`, `btrfs`, `hwdb`, `input_id`, `keyboard`, `kmod`,
+7. **Builtins and helpers (done, branch `phase7-builtins`):** `blkid`, `btrfs`, `hwdb`, `input_id`, `keyboard`, `kmod`,
    `net_id`, `net_setup_link` (`.link` files), `path_id`, `uaccess`, `usb_id` and the
-   rest, plus the eight helper programs in `/usr/lib/udev`.
+   rest, plus the eight helper programs in `/usr/lib/udev`; probed as root on the VM's
+   drives, and whole boots compared with C v262's.
 8. **Packaging:** a Gentoo ebuild (a `sys-apps/systemd-utils` drop-in), with a VM
    rehearsal and a rollback through a binary package of the C build.
 
