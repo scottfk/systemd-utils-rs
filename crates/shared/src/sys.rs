@@ -504,6 +504,12 @@ impl Dir {
         unsafe { libc::dirfd(self.0) }
     }
 
+    /// `rewinddir()`.
+    pub fn rewind(&mut self) {
+        // SAFETY: self.0 is a live DIR*.
+        unsafe { libc::rewinddir(self.0) }
+    }
+
     /// Give up ownership of the `DIR*`.
     fn into_raw(self) -> *mut libc::DIR {
         let d = self.0;
@@ -1180,6 +1186,59 @@ pub fn munmap(addr: usize, size: usize) {
     unsafe { libc::munmap(addr as *mut c_void, size) };
 }
 
+/// A read-only `MAP_SHARED` mapping of a whole file, as `sd-hwdb.c` maps
+/// hwdb.bin: unmapped when dropped.
+pub struct Mmap {
+    ptr: *const u8,
+    len: usize,
+}
+
+// SAFETY: the mapping is read-only and owned by this value alone; reading
+// it from several threads is fine.
+unsafe impl Send for Mmap {}
+// SAFETY: as above, &Mmap only hands out shared reads.
+unsafe impl Sync for Mmap {}
+
+impl Mmap {
+    /// `mmap(NULL, len, PROT_READ, MAP_SHARED, fd, 0)`.
+    pub fn map_readonly(fd: Fd, len: usize) -> Result<Mmap, i32> {
+        if len == 0 {
+            return Err(-libc::EINVAL);
+        }
+        // SAFETY: a new mapping at a kernel-chosen address; no existing
+        // memory is touched.
+        let p = unsafe { libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ, libc::MAP_SHARED, fd, 0) };
+        if p == libc::MAP_FAILED {
+            return Err(neg_errno());
+        }
+        Ok(Mmap { ptr: p as *const u8, len })
+    }
+}
+
+impl std::ops::Deref for Mmap {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        // SAFETY: ptr..ptr+len is our live PROT_READ mapping.  Like C, this
+        // trusts the file not to be truncated or rewritten in place while
+        // mapped: hwdb.bin is only ever replaced by rename().
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+impl Drop for Mmap {
+    fn drop(&mut self) {
+        // SAFETY: unmapping the region map_readonly() mapped; no slice of it
+        // outlives self.
+        unsafe { libc::munmap(self.ptr as *mut c_void, self.len) };
+    }
+}
+
+impl std::fmt::Debug for Mmap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Mmap({} bytes)", self.len)
+    }
+}
+
 /// `prctl(PR_SET_MM, what, value)`.
 pub fn prctl_set_mm(what: c_int, value: usize) -> Result<(), i32> {
     // SAFETY: PR_SET_MM only changes this process's mm fields; failure is reported.
@@ -1625,6 +1684,13 @@ pub fn fstatfs(fd: Fd) -> Result<StatFs, i32> {
 pub fn ioctl_ptr<T: Copy>(fd: Fd, req: u64, arg: &mut T) -> Result<c_int, i32> {
     // SAFETY: arg is a valid, writable T of the size the request encodes.
     let r = unsafe { libc::ioctl(fd, req as _, arg as *mut T) };
+    if r < 0 { Err(neg_errno()) } else { Ok(r) }
+}
+
+/// `ioctl(fd, req, value)` with an integer argument.
+pub fn ioctl_int(fd: Fd, req: u64, value: libc::c_ulong) -> Result<c_int, i32> {
+    // SAFETY: the request takes its argument by value, no pointers.
+    let r = unsafe { libc::ioctl(fd, req as _, value) };
     if r < 0 { Err(neg_errno()) } else { Ok(r) }
 }
 
@@ -2370,4 +2436,221 @@ pub fn setsid_detach() {
         unsafe { libc::ioctl(fd, libc::TIOCNOTTY) };
         close(fd);
     }
+}
+
+/// `ioctl(fd, SIOCETHTOOL, &ifr)` with `ifr.ifr_data` pointing at `data`
+/// (an ethtool command struct, its first u32 the command).
+pub fn siocethtool(fd: Fd, ifname: &[u8], data: &mut [u8]) -> Result<(), i32> {
+    // SAFETY: ifreq is plain old data.
+    let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
+    for (d, s) in ifr.ifr_name.iter_mut().zip(ifname.iter().take(libc::IFNAMSIZ - 1)) {
+        *d = *s as c_char;
+    }
+    ifr.ifr_ifru.ifru_data = data.as_mut_ptr().cast();
+    // SAFETY: ifr is valid and its data pointer refers to `data`, which is
+    // as large as the command struct the kernel reads and writes.
+    if unsafe {
+        libc::ioctl(fd, 0x8946 /* SIOCETHTOOL */, &mut ifr)
+    } < 0
+    {
+        Err(neg_errno())
+    } else {
+        Ok(())
+    }
+}
+
+unsafe extern "C" {
+    #[link_name = "inet_pton"]
+    fn inet_pton_raw(af: c_int, src: *const c_char, dst: *mut libc::c_void) -> c_int;
+}
+
+/// `inet_pton(family, s, buf)`: the address bytes, None if `s` isn't one.
+pub fn inet_pton(family: c_int, s: &[u8]) -> Option<Vec<u8>> {
+    let c = to_cstring(s);
+    let mut buf = [0u8; 16];
+    // SAFETY: c is NUL-terminated; buf holds an in6_addr.
+    let r = unsafe { inet_pton_raw(family, c.as_ptr(), buf.as_mut_ptr().cast()) };
+    if r <= 0 {
+        return None;
+    }
+    Some(buf[..if family == libc::AF_INET { 4 } else { 16 }].to_vec())
+}
+
+unsafe extern "C" {
+    #[link_name = "gnu_get_libc_version"]
+    fn gnu_get_libc_version_raw() -> *const c_char;
+}
+
+/// `gnu_get_libc_version()`.
+pub fn gnu_get_libc_version() -> Vec<u8> {
+    // SAFETY: glibc returns a static NUL-terminated string.
+    unsafe { CStr::from_ptr(gnu_get_libc_version_raw()) }.to_bytes().to_vec()
+}
+
+/// `printf("%g")` (or `"%.Ng"` with a precision) of `v`, by libc.
+pub fn format_g(v: f64, precision: Option<i32>) -> Vec<u8> {
+    let mut buf = [0u8; 64];
+    // SAFETY: buf is valid for its length; the formats take one double
+    // (and an int precision), which is what is passed.
+    let n = unsafe {
+        match precision {
+            None => libc::snprintf(buf.as_mut_ptr().cast(), buf.len(), c"%g".as_ptr(), v),
+            Some(p) => libc::snprintf(buf.as_mut_ptr().cast(), buf.len(), c"%.*g".as_ptr(), p, v),
+        }
+    };
+    buf[..(n.max(0) as usize).min(buf.len() - 1)].to_vec()
+}
+
+/// `SG_IO`.
+const SG_IO: u64 = 0x2285;
+
+/// The status fields an `SG_IO` request reports.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SgStatus {
+    /// v4: device_status, transport_status, driver_status.  v3: status,
+    /// host_status, driver_status.
+    pub a: u32,
+    pub b: u32,
+    pub c: u32,
+    /// v3: the residual count (`resid`); v4: din_resid.
+    pub resid: i32,
+    /// v3: msg_status; v4: 0.
+    pub msg_status: u32,
+    /// The sense bytes written: v3 sb_len_wr, v4 response_len.
+    pub sense_len: u32,
+    /// v3: info and masked_status; v4: 0.
+    pub info: u32,
+    pub masked_status: u32,
+}
+
+/// `ioctl(fd, SG_IO, &io_v4)` with a `struct sg_io_v4` for a SCSI command
+/// reading into `data` (BSG_PROTOCOL_SCSI, BSG_SUB_PROTOCOL_SCSI_CMD).
+pub fn sg_io_v4(fd: Fd, cdb: &[u8], sense: &mut [u8], data: &mut [u8], timeout_ms: u32) -> Result<SgStatus, i32> {
+    let mut io = [0u8; 160];
+    let put32 = |io: &mut [u8; 160], o: usize, v: u32| io[o..o + 4].copy_from_slice(&v.to_ne_bytes());
+    let put64 = |io: &mut [u8; 160], o: usize, v: u64| io[o..o + 8].copy_from_slice(&v.to_ne_bytes());
+    put32(&mut io, 0, b'Q' as u32);
+    put32(&mut io, 12, cdb.len() as u32);
+    put64(&mut io, 16, cdb.as_ptr() as usize as u64);
+    put32(&mut io, 44, sense.len() as u32);
+    put64(&mut io, 48, sense.as_mut_ptr() as usize as u64);
+    put32(&mut io, 68, data.len() as u32);
+    put64(&mut io, 80, data.as_mut_ptr() as usize as u64);
+    put32(&mut io, 88, timeout_ms);
+    // SAFETY: io is a struct sg_io_v4 whose pointers refer to cdb (read
+    // only), sense and data, all valid for the lengths given and
+    // exclusively borrowed for the call.
+    if unsafe { libc::ioctl(fd, SG_IO as _, io.as_mut_ptr()) } != 0 {
+        return Err(neg_errno());
+    }
+    let get32 = |o: usize| u32::from_ne_bytes(io[o..o + 4].try_into().expect("4 bytes"));
+    Ok(SgStatus {
+        a: get32(116),
+        b: get32(112),
+        c: get32(108),
+        resid: get32(136) as i32,
+        msg_status: 0,
+        sense_len: get32(132),
+        info: 0,
+        masked_status: 0,
+    })
+}
+
+/// `ioctl(fd, SG_IO, &io_hdr)` with a `struct sg_io_hdr` (version 3)
+/// reading into `data` (SG_DXFER_FROM_DEV), or writing nothing when
+/// `data` is empty and `dir` is SG_DXFER_NONE.
+pub fn sg_io_v3(
+    fd: Fd,
+    cdb: &[u8],
+    sense: &mut [u8],
+    data: &mut [u8],
+    dir: i32,
+    timeout_ms: u32,
+) -> Result<SgStatus, i32> {
+    sg_io_v3_full(fd, cdb, sense, data, dir, 0, timeout_ms)
+}
+
+/// [`sg_io_v3`] with the request's `flags` (SG_FLAG_*).
+pub fn sg_io_v3_full(
+    fd: Fd,
+    cdb: &[u8],
+    sense: &mut [u8],
+    data: &mut [u8],
+    dir: i32,
+    flags: u32,
+    timeout_ms: u32,
+) -> Result<SgStatus, i32> {
+    // (size, dxferp, cmdp, sbp, timeout, status, host_status,
+    // driver_status, info); flags follows timeout.
+    #[cfg(target_pointer_width = "64")]
+    const L: (usize, usize, usize, usize, usize, usize, usize, usize, usize) = (88, 16, 24, 32, 40, 64, 68, 70, 80);
+    #[cfg(target_pointer_width = "32")]
+    const L: (usize, usize, usize, usize, usize, usize, usize, usize, usize) = (64, 16, 20, 24, 28, 44, 48, 50, 60);
+    let (size, dxferp, cmdp, sbp, timeout, status, host, driver, info) = L;
+    let mut io = vec![0u8; size];
+    io[0..4].copy_from_slice(&(b'S' as i32).to_ne_bytes());
+    io[4..8].copy_from_slice(&dir.to_ne_bytes());
+    io[8] = cdb.len() as u8;
+    io[9] = sense.len() as u8;
+    io[12..16].copy_from_slice(&(data.len() as u32).to_ne_bytes());
+    let ptr = |io: &mut Vec<u8>, o: usize, p: usize| {
+        let b = p.to_ne_bytes();
+        io[o..o + b.len()].copy_from_slice(&b);
+    };
+    ptr(&mut io, dxferp, if data.is_empty() { 0 } else { data.as_mut_ptr() as usize });
+    ptr(&mut io, cmdp, cdb.as_ptr() as usize);
+    ptr(&mut io, sbp, sense.as_mut_ptr() as usize);
+    io[timeout..timeout + 4].copy_from_slice(&timeout_ms.to_ne_bytes());
+    io[timeout + 4..timeout + 8].copy_from_slice(&flags.to_ne_bytes());
+    // SAFETY: io is a struct sg_io_hdr whose pointers refer to cdb (read
+    // only), sense and data, all valid for the lengths given and
+    // exclusively borrowed for the call.
+    if unsafe { libc::ioctl(fd, SG_IO as _, io.as_mut_ptr()) } != 0 {
+        return Err(neg_errno());
+    }
+    // resid follows driver_status (72 or 52).
+    let resid = status + 8;
+    Ok(SgStatus {
+        a: io[status] as u32,
+        b: u16::from_ne_bytes([io[host], io[host + 1]]) as u32,
+        c: u16::from_ne_bytes([io[driver], io[driver + 1]]) as u32,
+        resid: i32::from_ne_bytes(io[resid..resid + 4].try_into().expect("4 bytes")),
+        msg_status: io[status + 2] as u32,
+        sense_len: io[status + 3] as u32,
+        info: u32::from_ne_bytes(io[info..info + 4].try_into().expect("4 bytes")),
+        masked_status: io[status + 1] as u32,
+    })
+}
+
+/// `BLKPG_ADD_PARTITION`, `BLKPG_DEL_PARTITION`, `BLKPG_RESIZE_PARTITION`.
+pub const BLKPG_ADD_PARTITION: i32 = 1;
+pub const BLKPG_DEL_PARTITION: i32 = 2;
+pub const BLKPG_RESIZE_PARTITION: i32 = 3;
+
+/// `ioctl(fd, BLKPG, &ba)` with a `struct blkpg_partition` of partition
+/// `pno` at byte offset `start`, `length` bytes long.
+pub fn blkpg(fd: Fd, op: i32, pno: i32, start: u64, length: u64) -> Result<(), i32> {
+    const BLKPG: u64 = 0x1269;
+    // struct blkpg_partition: start, length (long long), pno (int),
+    // devname[64], volname[64]; 152 bytes on x86-64, 148 on i686.
+    #[cfg(target_pointer_width = "64")]
+    const PART: usize = 152;
+    #[cfg(target_pointer_width = "32")]
+    const PART: usize = 148;
+    let mut bp = [0u8; PART];
+    bp[0..8].copy_from_slice(&start.to_ne_bytes());
+    bp[8..16].copy_from_slice(&length.to_ne_bytes());
+    bp[16..20].copy_from_slice(&pno.to_ne_bytes());
+    // struct blkpg_ioctl_arg: op, flags, datalen (int), data (pointer).
+    let mut ba = [0u8; 8 + 2 * std::mem::size_of::<usize>()];
+    let data_off = ba.len() - std::mem::size_of::<usize>();
+    ba[0..4].copy_from_slice(&op.to_ne_bytes());
+    ba[8..12].copy_from_slice(&(PART as i32).to_ne_bytes());
+    ba[data_off..].copy_from_slice(&(bp.as_mut_ptr() as usize).to_ne_bytes());
+    // SAFETY: ba is a struct blkpg_ioctl_arg whose data pointer refers to
+    // bp, valid and exclusively borrowed for the call.
+    if unsafe { libc::ioctl(fd, BLKPG as _, ba.as_mut_ptr()) } < 0 {
+        return Err(neg_errno());
+    }
+    Ok(())
 }

@@ -2,10 +2,12 @@
 //! The udev engine: what `udevadm test` and (later) udevd share.
 
 pub mod builtin;
+pub mod builtins;
 pub mod def;
 pub mod dump;
 pub mod event;
 pub mod format;
+pub mod net;
 pub mod node;
 pub mod rules;
 pub mod spawn;

@@ -69,3 +69,18 @@ pub fn errno_or_else(fallback: i32) -> i32 {
     let e = crate::sys::errno();
     if e > 0 { -e } else { -fallback.abs() }
 }
+
+/// `ERRNO_IS_NEG_NOT_SUPPORTED(r)`.
+pub fn errno_is_neg_not_supported(r: i32) -> bool {
+    [
+        -libc::EOPNOTSUPP,
+        -libc::ENOTTY,
+        -libc::ENOSYS,
+        -libc::EAFNOSUPPORT,
+        -libc::EPFNOSUPPORT,
+        -libc::EPROTONOSUPPORT,
+        -libc::ESOCKTNOSUPPORT,
+        -libc::ENOPROTOOPT,
+    ]
+    .contains(&r)
+}

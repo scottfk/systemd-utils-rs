@@ -207,18 +207,20 @@ pub fn event_source_disable(ev: &mut Ev, slot: Option<Id>) {
     }
 }
 
-/// `dlopen_*(LOG_DEBUG)` of the libraries C loads before forking workers:
-/// they're probed, for the same log lines.
+/// `dlopen_*(LOG_DEBUG)` of the libraries C loads before forking workers.
+/// libmount isn't used by anything ported, so it's only probed, for the
+/// same log line.
 fn dlopen_libraries() {
     let _ = shared::sys_acl::dlopen_libacl(shared::log::LOG_DEBUG);
-    for lib in ["libblkid.so.1", "libkmod.so.2", "libmount.so.1"] {
-        match shared::sys_acl::dlopen_probe(lib.as_bytes()) {
-            Ok(()) => {
-                log_debug!("Loaded shared library '", lib, "' via dlopen().");
-            }
-            Err((r, dle)) => {
-                log_debug!("Shared library '", lib, "' is not available: ", dle.unwrap_or_else(|| strerror(r)));
-            }
+    let _ = shared::sys_blkid::dlopen_libblkid(shared::log::LOG_DEBUG);
+    let _ = shared::sys_kmod::dlopen_libkmod(shared::log::LOG_DEBUG);
+    let lib = "libmount.so.1";
+    match shared::sys_acl::dlopen_probe(lib.as_bytes()) {
+        Ok(()) => {
+            log_debug!("Loaded shared library '", lib, "' via dlopen().");
+        }
+        Err((r, dle)) => {
+            log_debug!("Shared library '", lib, "' is not available: ", dle.unwrap_or_else(|| strerror(r)));
         }
     }
     log_debug_errno!(shared::errno::synthetic(libc::EOPNOTSUPP), "TPM2 support is not compiled in.");

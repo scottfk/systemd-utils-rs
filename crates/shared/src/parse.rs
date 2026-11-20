@@ -141,6 +141,21 @@ pub fn safe_atoi(s: &[u8]) -> Result<i32, i32> {
     Ok(l as i32)
 }
 
+/// `safe_atoi64()` (`safe_atolli()`).
+pub fn safe_atoi64(s: &[u8]) -> Result<i64, i32> {
+    let mut base = 0;
+    let s = skip_ws(s);
+    let s = mangle_base(s, &mut base);
+    let (l, consumed, e) = sys::strtoll(s, base as i32);
+    if e > 0 {
+        return Err(-e);
+    }
+    if consumed == 0 || consumed != s.len() || s.contains(&0) {
+        return Err(-libc::EINVAL);
+    }
+    Ok(l)
+}
+
 /// `parse_mode()`: octal, at most 07777.
 pub fn parse_mode(s: &[u8]) -> Result<u32, i32> {
     let m = safe_atou_full(s, 8 | SAFE_ATO_REFUSE_PLUS_MINUS)?;
@@ -186,4 +201,102 @@ pub fn parse_boolean_argument(optname: &str, s: Option<&[u8]>) -> Result<bool, i
         Some(s) => parse_boolean(s)
             .map_err(|r| crate::log_error_errno!(r, "Failed to parse boolean argument to '", optname, "': ", s)),
     }
+}
+
+/// `parse_tristate(v, &ret)`: -1 for the empty string.
+pub fn parse_tristate(v: &[u8]) -> Result<i32, i32> {
+    if v.is_empty() {
+        return Ok(-1);
+    }
+    parse_boolean(v).map(i32::from)
+}
+
+/// `parse_size(t, base, &size)`: base is 1000 (SI) or 1024 (IEC).
+pub fn parse_size(t: &[u8], base: u64) -> Result<u64, i32> {
+    const fn pow(b: u64, n: u32) -> u64 {
+        b.pow(n)
+    }
+    let table: [(&[u8], u64); 8] = [
+        (b"E", pow(base, 6)),
+        (b"P", pow(base, 5)),
+        (b"T", pow(base, 4)),
+        (b"G", pow(base, 3)),
+        (b"M", pow(base, 2)),
+        (b"K", base),
+        (b"B", 1),
+        (b"", 1),
+    ];
+    let ws = crate::string::WHITESPACE;
+    let at = |s: &[u8], i: usize| s.get(i).copied().unwrap_or(0);
+    let mut r: u64 = 0;
+    let mut start_pos = 0;
+    let mut p = t;
+    loop {
+        p = crate::string::skip_leading_chars(p, Some(ws));
+        let (l, consumed, e) = sys::strtoull(p, 10);
+        if e > 0 {
+            return Err(-e);
+        }
+        if consumed == 0 {
+            return Err(-libc::EINVAL);
+        }
+        if at(p, 0) == b'-' {
+            return Err(-libc::ERANGE);
+        }
+        let mut rest = &p[consumed..];
+        let mut frac = 0f64;
+        if at(rest, 0) == b'.' {
+            rest = &rest[1..];
+            if at(rest, 0).is_ascii_digit() {
+                let (l2, c2, e2) = sys::strtoull(rest, 10);
+                if e2 > 0 {
+                    return Err(-e2);
+                }
+                frac = l2 as f64;
+                for _ in 0..c2 {
+                    frac /= 10.0;
+                }
+                rest = &rest[c2..];
+            }
+        }
+        rest = crate::string::skip_leading_chars(rest, Some(ws));
+        let Some(i) = (start_pos..table.len()).find(|&i| rest.starts_with(table[i].0)) else {
+            return Err(-libc::EINVAL);
+        };
+        let factor = table[i].1;
+        if l + u64::from(frac > 0.0) > u64::MAX / factor {
+            return Err(-libc::ERANGE);
+        }
+        let tmp = l * factor + (frac * factor as f64) as u64;
+        if tmp > u64::MAX - r {
+            return Err(-libc::ERANGE);
+        }
+        r += tmp;
+        p = &rest[table[i].0.len()..];
+        start_pos = i + 1;
+        if p.is_empty() {
+            break;
+        }
+    }
+    Ok(r)
+}
+
+/// `parse_mtu(family, s, &ret)` with AF_UNSPEC: no lower bound.
+pub fn parse_mtu(s: &[u8]) -> Result<u32, i32> {
+    let u = parse_size(s, 1024)?;
+    u32::try_from(u).map_err(|_| -libc::ERANGE)
+}
+
+/// `parse_range(t, &lower, &upper)`.
+pub fn parse_range(t: &[u8]) -> Result<(u32, u32), i32> {
+    use crate::extract::{EXTRACT_DONT_COALESCE_SEPARATORS, extract_first_word};
+    let mut p = Some(t);
+    let word = extract_first_word(&mut p, Some(b"-"), EXTRACT_DONT_COALESCE_SEPARATORS)?.ok_or(-libc::EINVAL)?;
+    let l = safe_atou(&word)?;
+    let u = match p {
+        None => l,
+        Some([]) => return Err(-libc::EINVAL),
+        Some(rest) => safe_atou(rest)?,
+    };
+    Ok((l, u))
 }

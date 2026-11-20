@@ -110,3 +110,36 @@ pub fn unbase64mem(input: &[u8]) -> Result<Vec<u8>, i32> {
     }
     Ok(out)
 }
+
+/// `unhexmem(p, &ret, &size)`: an even number of hex digits.
+pub fn unhexmem(p: &[u8]) -> Result<Vec<u8>, i32> {
+    if !p.len().is_multiple_of(2) {
+        return Err(-libc::EINVAL);
+    }
+    p.chunks(2)
+        .map(|c| {
+            let h = (c[0] as char).to_digit(16).ok_or(-libc::EINVAL)?;
+            let l = (c[1] as char).to_digit(16).ok_or(-libc::EINVAL)?;
+            Ok((h << 4 | l) as u8)
+        })
+        .collect()
+}
+
+/// `hexmem(p, l)`: lowercase hex.
+pub fn hexmem(p: &[u8]) -> Vec<u8> {
+    p.iter().flat_map(|b| format!("{b:02x}").into_bytes()).collect()
+}
+
+/// `base64mem(p, l, &ret)`: with padding, without line breaks.
+pub fn base64mem(p: &[u8]) -> Vec<u8> {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = Vec::with_capacity(p.len().div_ceil(3) * 4);
+    for c in p.chunks(3) {
+        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        out.push(T[(n >> 18) as usize & 63]);
+        out.push(T[(n >> 12) as usize & 63]);
+        out.push(if c.len() > 1 { T[(n >> 6) as usize & 63] } else { b'=' });
+        out.push(if c.len() > 2 { T[n as usize & 63] } else { b'=' });
+    }
+    out
+}

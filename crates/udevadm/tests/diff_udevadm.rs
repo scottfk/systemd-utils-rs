@@ -209,32 +209,15 @@ impl Json {
     }
 }
 
-/// Mask what is the same by design but can't match yet: the builtins'
-/// init and exit logging (the builtins are phase 7), and initialization
-/// timestamps taken from `CLOCK_MONOTONIC`.
+/// Mask what is the same by design but can't match: initialization
+/// timestamps taken from `CLOCK_MONOTONIC`, and a few racy lines.
 fn mask(s: &str) -> String {
     let mut out = String::new();
-    let mut in_builtins = false;
     for l in s.split_inclusive('\n') {
         let t = l.trim_end_matches(['\n', '\r']);
-        if t.ends_with("Loading builtins...") {
-            in_builtins = true;
-            out.push_str(l);
-            continue;
-        }
-        if t.ends_with("Loading builtins done.") {
-            in_builtins = false;
-        }
         // CPUID leaf 1 carries the APIC ID of the CPU we happen to run on.
         // The forked child's own log line races with the parent's.
-        if in_builtins
-            || t.starts_with("PR_SET_MM_ARG_START failed")
-            || t.starts_with("CPUID result ")
-            || is_set_element_trace(t)
-            || t.ends_with("Unloaded hardware database.")
-            || t.ends_with("Unloaded kernel module index.")
-            || t.ends_with("Unloaded link configuration context.")
-        {
+        if t.starts_with("PR_SET_MM_ARG_START failed") || t.starts_with("CPUID result ") || is_set_element_trace(t) {
             continue;
         }
         out.push_str(&mask_usec(l));
@@ -1150,5 +1133,49 @@ fn limits() {
             .file("bin/ata_id", script.as_bytes(), 0o755)
             .env("ATA_ID_PATH", "@T@/bin/ata_id")
             .mask(mask_big_output));
+    }
+}
+
+/// `test-builtin` of every builtin on every device of upstream's fake
+/// sysfs: one case per builtin, the devices in sorted order.
+#[test]
+fn builtins_fake_sysfs() {
+    for b in [
+        "blkid",
+        "btrfs",
+        "factory_reset",
+        "hwdb",
+        "input_id",
+        "keyboard",
+        "kmod",
+        "net_driver",
+        "net_id",
+        "net_setup_link",
+        "path_id",
+        "uaccess",
+        "usb_id",
+    ] {
+        let script = format!(
+            "find /sys/devices -name uevent | sed 's,/uevent$,,' | LC_ALL=C sort | while read -r d; do \
+             echo \"== $d\"; udevadm test-builtin {b} \"$d\" 2>&1; echo \"rc=$?\"; done"
+        );
+        c(f(&format!("builtin_{b}"), &[]).shell(&script));
+    }
+    // Arguments and options.
+    for (n, a) in [
+        ("builtin_hwdb_modalias", &["hwdb", "usb:v0000p0000"][..]),
+        ("builtin_hwdb_filter", &["hwdb --filter=ID_VENDOR* --lookup-prefix=x: usb:v1d6bp0002"]),
+        ("builtin_blkid_opts", &["blkid --noraid --offset=-1 --hint=session_offset=1"]),
+        ("builtin_net_setup_link_args", &["net_setup_link extra"]),
+        ("builtin_unknown", &["nosuch"]),
+        ("builtin_no_args", &[]),
+    ] {
+        let dev = "/sys/devices/pci0000:00/0000:00:1d.7/usb5/5-2/5-2:1.0";
+        let mut args: Vec<&str> = vec!["test-builtin"];
+        args.extend_from_slice(a);
+        if !a.is_empty() {
+            args.push(dev);
+        }
+        c(f(n, &args));
     }
 }

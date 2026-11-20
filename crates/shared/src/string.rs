@@ -318,3 +318,140 @@ pub fn strv_rebreak_lines(l: &[Vec<u8>], width: usize) -> Result<Vec<Vec<u8>>, i
     }
     Ok(broken)
 }
+
+/// One separator step of `strverscmp_improved()`: Some(order) to return.
+fn sep_step(sep: u8, ca: u8, cb: u8, i: &mut usize, j: &mut usize) -> Option<std::cmp::Ordering> {
+    if ca == sep || cb == sep {
+        let r = (ca != sep).cmp(&(cb != sep));
+        if r.is_ne() {
+            return Some(r);
+        }
+        *i += 1;
+        *j += 1;
+    }
+    None
+}
+
+/// `strverscmp_improved(a, b)`: version comparison as in the UAPI version
+/// format specification.  None compares like the empty string.
+pub fn strverscmp_improved(a: Option<&[u8]>, b: Option<&[u8]>) -> std::cmp::Ordering {
+    use std::cmp::Ordering::Equal;
+    let (a, b) = (a.unwrap_or(b""), b.unwrap_or(b""));
+    let at = |s: &[u8], i: usize| s.get(i).copied().unwrap_or(0);
+    let valid = |c: u8| c.is_ascii_alphanumeric() || matches!(c, b'~' | b'-' | b'^' | b'.');
+    let (mut i, mut j) = (0usize, 0usize);
+    loop {
+        while at(a, i) != 0 && !valid(at(a, i)) {
+            i += 1;
+        }
+        while at(b, j) != 0 && !valid(at(b, j)) {
+            j += 1;
+        }
+        if let Some(r) = sep_step(b'~', at(a, i), at(b, j), &mut i, &mut j) {
+            return r;
+        }
+        if at(a, i) == 0 || at(b, j) == 0 {
+            return at(a, i).cmp(&at(b, j));
+        }
+        for &sep in b"-^." {
+            if let Some(r) = sep_step(sep, at(a, i), at(b, j), &mut i, &mut j) {
+                return r;
+            }
+        }
+        let (mut ii, mut jj);
+        if at(a, i).is_ascii_digit() || at(b, j).is_ascii_digit() {
+            ii = i;
+            while at(a, ii).is_ascii_digit() {
+                ii += 1;
+            }
+            jj = j;
+            while at(b, jj).is_ascii_digit() {
+                jj += 1;
+            }
+            let r = (i != ii).cmp(&(j != jj));
+            if r != Equal {
+                return r;
+            }
+            while at(a, i) == b'0' {
+                i += 1;
+            }
+            while at(b, j) == b'0' {
+                j += 1;
+            }
+            let r = (ii - i).cmp(&(jj - j));
+            if r != Equal {
+                return r;
+            }
+            let r = a[i..ii].cmp(&b[j..jj]);
+            if r != Equal {
+                return r;
+            }
+        } else {
+            ii = i;
+            while at(a, ii).is_ascii_alphabetic() {
+                ii += 1;
+            }
+            jj = j;
+            while at(b, jj).is_ascii_alphabetic() {
+                jj += 1;
+            }
+            let n = (ii - i).min(jj - j);
+            let r = a[i..i + n].cmp(&b[j..j + n]);
+            if r != Equal {
+                return r;
+            }
+            let r = (ii - i).cmp(&(jj - j));
+            if r != Equal {
+                return r;
+            }
+        }
+        i = ii;
+        j = jj;
+    }
+}
+
+#[cfg(test)]
+mod strverscmp_tests {
+    use super::strverscmp_improved as c;
+    use std::cmp::Ordering::*;
+
+    #[test]
+    fn upstream_order() {
+        // From test-string-util.c's ordered list.
+        let l: &[&[u8]] = &[
+            b"~1",
+            b"",
+            b"ab",
+            b"abb",
+            b"abc",
+            b"0001",
+            b"002",
+            b"12",
+            b"122",
+            b"122.9",
+            b"123~rc1",
+            b"123",
+            b"123-a",
+            b"123-a.1",
+            b"123-a1",
+            b"123-a1.1",
+            b"123-3",
+            b"123-3.1",
+            b"123^patch1",
+            b"123^1",
+            b"123.a-1",
+            b"123.1-1",
+            b"123a-1",
+            b"124",
+        ];
+        for (x, a) in l.iter().enumerate() {
+            assert_eq!(c(Some(a), Some(a)), Equal);
+            for b in &l[x + 1..] {
+                assert_eq!(c(Some(a), Some(b)), Less, "{:?} < {:?}", a, b);
+                assert_eq!(c(Some(b), Some(a)), Greater);
+            }
+        }
+        assert_eq!(c(None, Some(b"")), Equal);
+        assert_eq!(c(Some(b"1.0"), None), Greater);
+    }
+}

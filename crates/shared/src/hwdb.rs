@@ -685,7 +685,7 @@ pub fn hwdb_update(root: Option<&[u8]>, hwdb_bin_dir: Option<&[u8]>, strict: boo
 /// (key → offset of its value entry), in insertion order.
 #[derive(Debug)]
 pub struct Hwdb {
-    map: Vec<u8>,
+    map: sys::Mmap,
     properties: Vec<(Vec<u8>, usize)>,
     properties_modified: bool,
     iterator: usize,
@@ -960,16 +960,14 @@ impl Hwdb {
         if st.st_size < HEADER_SIZE as i64 {
             return Err(log_debug_errno!(synthetic(libc::EIO), "File ", path, " is too short."));
         }
-        let mut map = vec![0u8; st.st_size as usize];
-        let mut got = 0;
-        while got < map.len() {
-            match sys::read(fd.raw(), &mut map[got..]) {
-                Ok(0) => break,
-                Ok(n) => got += n,
-                Err(e) => return Err(log_debug_errno!(e, "Failed to map ", path, ": ", strerror(e))),
-            }
+        // file_offset_beyond_memory_size()
+        if st.st_size as u64 > usize::MAX as u64 {
+            return Err(log_debug_errno!(synthetic(libc::EFBIG), "File ", path, " is too long."));
         }
-        map.truncate(got);
+        let map = match sys::Mmap::map_readonly(fd.raw(), st.st_size as usize) {
+            Ok(m) => m,
+            Err(e) => return Err(log_debug_errno!(e, "Failed to map ", path, ": ", strerror(e))),
+        };
         let h =
             Hwdb { map, properties: Vec::new(), properties_modified: false, iterator: 0, mtime: sys::stat_mtime(&st) };
         if h.map.len() < HEADER_SIZE as usize || &h.map[..8] != HWDB_SIG || st.st_size as u64 != h.u64_at(16) {

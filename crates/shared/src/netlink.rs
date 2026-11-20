@@ -109,6 +109,34 @@ fn getlink(ifindex: i32) -> Result<Vec<u8>, i32> {
 /// `(container, [(type, payload)])`), then `sd_netlink_call()`: the
 /// RTM_NEWLINK reply, if any.
 fn call(msg_type: u16, ifindex: i32, attrs: &[Attr], nested: Option<(u16, &[Attr])>) -> Result<Option<Vec<u8>>, i32> {
+    let mut body = Vec::new();
+    for (ty, payload) in attrs {
+        push_attr(&mut body, *ty, payload);
+    }
+    if let Some((container, inner)) = nested {
+        let mut b = Vec::new();
+        for (ty, payload) in inner {
+            push_attr(&mut b, *ty, payload);
+        }
+        push_attr(&mut body, container | NLA_F_NESTED, &b);
+    }
+    call_body(msg_type, ifindex, &body)
+}
+
+/// An attribute appended to a message body being built; `nested` sets
+/// NLA_F_NESTED (`sd_netlink_message_open_container()`).
+pub fn append_attr(body: &mut Vec<u8>, ty: u16, payload: &[u8], nested: bool) {
+    push_attr(body, if nested { ty | NLA_F_NESTED } else { ty }, payload);
+}
+
+/// `sd_rtnl_message_new_link(RTM_SETLINK, ifindex)` with the attributes in
+/// `body`, then `sd_netlink_call()`.
+pub fn rtnl_setlink_body(ifindex: i32, body: &[u8]) -> Result<(), i32> {
+    call_body(RTM_SETLINK, ifindex, body).map(|_| ())
+}
+
+/// [`call`] with a prebuilt attribute body.
+fn call_body(msg_type: u16, ifindex: i32, body: &[u8]) -> Result<Option<Vec<u8>>, i32> {
     let fd = OwnedFd::new(sys::socket(
         libc::AF_NETLINK,
         libc::SOCK_RAW | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
@@ -129,16 +157,7 @@ fn call(msg_type: u16, ifindex: i32, attrs: &[Attr], nested: Option<(u16, &[Attr
     req.extend_from_slice(&[0, 0, 0, 0]);
     req.extend_from_slice(&ifindex.to_ne_bytes());
     req.extend_from_slice(&[0; 8]);
-    for (ty, payload) in attrs {
-        push_attr(&mut req, *ty, payload);
-    }
-    if let Some((container, inner)) = nested {
-        let mut body = Vec::new();
-        for (ty, payload) in inner {
-            push_attr(&mut body, *ty, payload);
-        }
-        push_attr(&mut req, container | NLA_F_NESTED, &body);
-    }
+    req.extend_from_slice(body);
     let total = req.len() as u32;
     req[..4].copy_from_slice(&total.to_ne_bytes());
     sys_net::sendmsg_netlink(fd.raw(), &[&req], 0, 0)?;
@@ -379,4 +398,142 @@ pub fn rtnl_set_link_name(ifindex: i32, name: Option<&[u8]>, alternative_names: 
         Ok(()) => {}
     }
     Ok(())
+}
+
+const IFLA_ADDRESS: u16 = 1;
+const IFLA_MTU: u16 = 4;
+const IFLA_TXQLEN: u16 = 13;
+const IFLA_LINKINFO: u16 = 18;
+const IFLA_INFO_KIND: u16 = 1;
+const IFLA_IFALIAS: u16 = 20;
+const IFLA_NUM_TX_QUEUES: u16 = 31;
+const IFLA_NUM_RX_QUEUES: u16 = 32;
+const IFLA_GSO_MAX_SEGS: u16 = 40;
+const IFLA_GSO_MAX_SIZE: u16 = 41;
+const IFLA_PERM_ADDRESS: u16 = 54;
+
+/// The top-level attributes of an RTM_NEWLINK message: (type, payload).
+fn link_attrs(msg: &[u8]) -> Vec<(u16, &[u8])> {
+    let mut out = Vec::new();
+    let mut i = 32;
+    while i + 4 <= msg.len() {
+        let len = u16_at(msg, i) as usize;
+        let ty = u16_at(msg, i + 2) & 0x3fff;
+        if len < 4 || i + len > msg.len() {
+            break;
+        }
+        out.push((ty, &msg[i + 4..i + len]));
+        i += align4(len);
+    }
+    out
+}
+
+/// The attributes nested in `payload`.
+fn nested_attrs(payload: &[u8]) -> Vec<(u16, &[u8])> {
+    let mut out = Vec::new();
+    let mut j = 0;
+    while j + 4 <= payload.len() {
+        let l = u16_at(payload, j) as usize;
+        let t = u16_at(payload, j + 2) & 0x3fff;
+        if l < 4 || j + l > payload.len() {
+            break;
+        }
+        out.push((t, &payload[j + 4..j + l]));
+        j += align4(l);
+    }
+    out
+}
+
+/// What `rtnl_get_link_info()` returns.
+#[derive(Debug, Clone, Default)]
+pub struct LinkInfo {
+    pub iftype: u16,
+    pub flags: u32,
+    pub kind: Option<Vec<u8>>,
+    pub hw_addr: Vec<u8>,
+    pub permanent_hw_addr: Vec<u8>,
+}
+
+/// `netlink_message_read_hw_addr()`: empty if absent.
+fn read_hw_addr(attrs: &[(u16, &[u8])], ty: u16) -> Result<Vec<u8>, i32> {
+    match attrs.iter().find(|(t, _)| *t == ty) {
+        None => Ok(Vec::new()),
+        Some((_, p)) if p.len() > crate::ether_addr::HW_ADDR_MAX_SIZE => Err(-libc::EINVAL),
+        Some((_, p)) => Ok(p.to_vec()),
+    }
+}
+
+/// `rtnl_get_link_info(rtnl, ifindex, ...)`.
+pub fn rtnl_get_link_info(ifindex: i32) -> Result<LinkInfo, i32> {
+    let reply = match getlink(ifindex) {
+        Err(e) if e == -libc::EINVAL => return Err(-libc::ENODEV),
+        r => r?,
+    };
+    let (idx, _) = parse_newlink(&reply)?;
+    if idx <= 0 {
+        return Err(-libc::EPROTO);
+    }
+    if idx != ifindex {
+        return Err(-libc::EIO);
+    }
+    let attrs = link_attrs(&reply);
+    let kind = attrs
+        .iter()
+        .find(|(t, _)| *t == IFLA_LINKINFO)
+        .and_then(|(_, p)| nested_attrs(p).into_iter().find(|(t, _)| *t == IFLA_INFO_KIND))
+        .map(|(_, p)| crate::bytes::c_str_prefix(p).to_vec());
+    Ok(LinkInfo {
+        iftype: u16_at(&reply, 18),
+        flags: u32_at(&reply, 24),
+        kind,
+        hw_addr: read_hw_addr(&attrs, IFLA_ADDRESS)?,
+        permanent_hw_addr: read_hw_addr(&attrs, IFLA_PERM_ADDRESS)?,
+    })
+}
+
+/// `rtnl_set_link_properties(rtnl, ifindex, alias, hw_addr, txqueues,
+/// rxqueues, txqueuelen, mtu, gso_max_size, gso_max_segments)`.
+#[allow(clippy::too_many_arguments)]
+pub fn rtnl_set_link_properties(
+    ifindex: i32,
+    alias: Option<&[u8]>,
+    hw_addr: &[u8],
+    txqueues: u32,
+    rxqueues: u32,
+    txqueuelen: u32,
+    mtu: u32,
+    gso_max_size: u32,
+    gso_max_segments: u32,
+) -> Result<(), i32> {
+    if alias.is_none()
+        && hw_addr.is_empty()
+        && txqueues == 0
+        && rxqueues == 0
+        && txqueuelen == u32::MAX
+        && mtu == 0
+        && gso_max_size == 0
+        && gso_max_segments == 0
+    {
+        return Ok(());
+    }
+    let mut payloads: Vec<(u16, Vec<u8>)> = Vec::new();
+    if let Some(a) = alias {
+        payloads.push((IFLA_IFALIAS, cstr(a)));
+    }
+    if !hw_addr.is_empty() {
+        payloads.push((IFLA_ADDRESS, hw_addr.to_vec()));
+    }
+    let mut u32s = |ty: u16, v: u32, cond: bool| {
+        if cond {
+            payloads.push((ty, v.to_ne_bytes().to_vec()));
+        }
+    };
+    u32s(IFLA_NUM_TX_QUEUES, txqueues, txqueues > 0);
+    u32s(IFLA_NUM_RX_QUEUES, rxqueues, rxqueues > 0);
+    u32s(IFLA_TXQLEN, txqueuelen, txqueuelen < u32::MAX);
+    u32s(IFLA_MTU, mtu, mtu != 0);
+    u32s(IFLA_GSO_MAX_SIZE, gso_max_size, gso_max_size > 0);
+    u32s(IFLA_GSO_MAX_SEGS, gso_max_segments, gso_max_segments > 0);
+    let attrs: Vec<Attr> = payloads.iter().map(|(t, p)| (*t, &p[..])).collect();
+    call(RTM_SETLINK, ifindex, &attrs, None).map(|_| ())
 }

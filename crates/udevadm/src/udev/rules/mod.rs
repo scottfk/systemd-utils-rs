@@ -445,7 +445,7 @@ fn check_attr_format_and_warn(lc: &LineCtx, key: &[u8], attr: Option<&[u8]>) -> 
 }
 
 /// `device_property_can_set()`.
-fn device_property_can_set(p: &[u8]) -> bool {
+pub(crate) fn device_property_can_set(p: &[u8]) -> bool {
     const NO: &[&[u8]] = &[
         b"ACTION",
         b"SEQNUM",

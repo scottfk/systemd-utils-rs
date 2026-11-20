@@ -226,7 +226,9 @@ fn rename_netif(event: &mut Event) -> Result<bool, i32> {
         Err(r) => return Err(log_device_warning_errno!(dev, r, "Failed to get ifindex: ", strerror(r))),
         Ok(i) => i,
     };
-    if !shared::netlink::ifname_valid(&name) {
+    if shared::netif_naming_scheme::naming_scheme_has(shared::netif_naming_scheme::NAMING_REPLACE_STRICTLY)
+        && !shared::netlink::ifname_valid(&name)
+    {
         shared::log_device_warning!(dev, "Invalid network interface name, ignoring: ", &name[..]);
         return Ok(false);
     }

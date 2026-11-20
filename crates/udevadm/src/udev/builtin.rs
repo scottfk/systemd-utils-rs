@@ -4,9 +4,9 @@
 //! `EOPNOTSUPP`.
 
 use shared::errno::strerror;
+use shared::log_device_debug_errno;
 use shared::printo;
 use shared::string::WHITESPACE;
-use shared::{log_device_debug, log_device_debug_errno};
 
 use super::event::Event;
 
@@ -73,16 +73,98 @@ pub fn mask(cmd: BuiltinCommand) -> u32 {
     1u32 << (cmd as u32)
 }
 
-/// `udev_builtin_init()`.  Until the builtins are ported, this only does
-/// what their init has an effect on later: dissect_image's reads the
-/// kernel command line, and with it, detects (and caches) whether we run
-/// in a container.
+/// A builtin's hooks: `init`, `exit` and `should_reload`.
+struct Hooks {
+    cmd: BuiltinCommand,
+    init: Option<fn()>,
+    exit: Option<fn()>,
+    should_reload: Option<fn() -> bool>,
+}
+
+/// The builtins with hooks, in table order.
+fn hooks() -> Vec<Hooks> {
+    use super::builtins as b;
+    vec![
+        Hooks {
+            cmd: BuiltinCommand::DissectImage,
+            init: Some(b::dissect_image::init),
+            exit: Some(b::dissect_image::exit),
+            should_reload: None,
+        },
+        Hooks {
+            cmd: BuiltinCommand::Hwdb,
+            init: Some(b::hwdb::init),
+            exit: Some(b::hwdb::exit),
+            should_reload: Some(b::hwdb::should_reload),
+        },
+        Hooks {
+            cmd: BuiltinCommand::Kmod,
+            init: Some(b::kmod::init),
+            exit: Some(b::kmod::exit),
+            should_reload: Some(b::kmod::should_reload),
+        },
+        Hooks { cmd: BuiltinCommand::NetId, init: Some(b::net_id::init), exit: None, should_reload: None },
+        Hooks {
+            cmd: BuiltinCommand::NetLink,
+            init: Some(b::net_setup_link::init),
+            exit: Some(b::net_setup_link::exit),
+            should_reload: Some(b::net_setup_link::should_reload),
+        },
+    ]
+}
+
+/// `udev_builtin_init()`.
 pub fn udev_builtin_init() {
-    let _ = shared::proc_cmdline::proc_cmdline_get_key(b"systemd.image_policy", false);
+    for h in hooks() {
+        if let Some(f) = h.init {
+            f();
+        }
+    }
 }
 
 /// `udev_builtin_exit()`.
-pub fn udev_builtin_exit() {}
+pub fn udev_builtin_exit() {
+    for h in hooks() {
+        if let Some(f) = h.exit {
+            f();
+        }
+    }
+}
+
+/// `UDEV_RELOAD_KILL_WORKERS`.
+const UDEV_RELOAD_KILL_WORKERS: u32 = 1 << 30;
+
+/// `udev_builtin_should_reload()`: a bit per builtin, and
+/// `UDEV_RELOAD_KILL_WORKERS` with any.
+pub fn udev_builtin_should_reload() -> u32 {
+    let mut flags = 0;
+    for h in hooks() {
+        if let Some(f) = h.should_reload
+            && f()
+        {
+            flags |= mask(h.cmd);
+        }
+    }
+    if flags != 0 {
+        flags |= UDEV_RELOAD_KILL_WORKERS;
+    }
+    flags
+}
+
+/// `udev_builtin_reload(flags)`.
+pub fn udev_builtin_reload(flags: u32) {
+    for h in hooks() {
+        if flags & mask(h.cmd) == 0 {
+            continue;
+        }
+        if let Some(f) = h.exit {
+            f();
+        }
+        if let Some(f) = h.init {
+            f();
+        }
+    }
+}
 
 /// `udev_builtin_list()`.
 pub fn udev_builtin_list() {
@@ -110,13 +192,50 @@ pub fn udev_builtin_lookup(command: &[u8]) -> Option<BuiltinCommand> {
 
 /// `udev_builtin_run(event, cmd, command)`.
 pub fn udev_builtin_run(event: &mut Event, cmd: BuiltinCommand, command: &[u8]) -> Result<(), i32> {
-    let _argv = shared::extract::strv_split_full(
+    let argv = shared::extract::strv_split_full(
         command,
         None,
         shared::extract::EXTRACT_UNQUOTE | shared::extract::EXTRACT_RELAX | shared::extract::EXTRACT_RETAIN_ESCAPE,
     )?;
-    log_device_debug!(event.dev, "Built-in command '", builtin(cmd).name, "' is not ported yet.");
-    Err(-libc::EOPNOTSUPP)
+    use super::builtins as b;
+    match cmd {
+        BuiltinCommand::Blkid => b::blkid::run(event, &argv),
+        BuiltinCommand::Btrfs => b::btrfs::run(event, &argv),
+        BuiltinCommand::DissectImage => b::dissect_image::run(event, &argv),
+        BuiltinCommand::FactoryReset => b::factory_reset::run(event, &argv),
+        BuiltinCommand::Hwdb => b::hwdb::run(event, &argv),
+        BuiltinCommand::InputId => b::input_id::run(event, &argv),
+        BuiltinCommand::Keyboard => b::keyboard::run(event, &argv),
+        BuiltinCommand::Kmod => b::kmod::run(event, &argv),
+        BuiltinCommand::NetDriver => b::net_driver::run(event, &argv),
+        BuiltinCommand::NetId => b::net_id::run(event, &argv),
+        BuiltinCommand::NetLink => b::net_setup_link::run(event, &argv),
+        BuiltinCommand::UsbId => b::usb_id::run(event, &argv),
+        BuiltinCommand::PathId => b::path_id::run(event, &argv),
+        BuiltinCommand::Uaccess => b::uaccess::run(event, &argv),
+    }
+}
+
+/// `udev_builtin_import_property(event, key)`: copies the property from
+/// the database clone; Ok(true) if it was there.
+pub fn udev_builtin_import_property(event: &Event, key: &[u8]) -> Result<bool, i32> {
+    let Some(db) = event.dev_db_clone.clone() else { return Ok(false) };
+    let val = match db.get_property_value(key) {
+        Err(r) if r == -libc::ENOENT => return Ok(false),
+        Err(r) => {
+            return Err(log_device_debug_errno!(
+                db,
+                r,
+                "Failed to get property \"",
+                key,
+                "\", ignoring: ",
+                strerror(r)
+            ));
+        }
+        Ok(v) => v.bytes().to_vec(),
+    };
+    udev_builtin_add_property(event, key, Some(&val))?;
+    Ok(true)
 }
 
 /// `udev_builtin_add_property(event, key, val)`.

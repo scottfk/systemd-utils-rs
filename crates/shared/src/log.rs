@@ -1248,3 +1248,26 @@ macro_rules! log_syntax {
         }
     }};
 }
+
+/// `log_interface_full_errno_zerook(ifname, level, error, ...)` (and the
+/// `log_link_*()` family on a `Link` with that ifname): `INTERFACE=` as
+/// the object, None to log plainly.
+#[macro_export]
+macro_rules! log_interface {
+    ($ifname:expr, $level:expr, $err:expr, $($e:expr),* $(,)?) => {{
+        let level: i32 = $level;
+        let err: i32 = $err;
+        if $crate::log::enabled(level) {
+            let ifname: Option<&[u8]> = $ifname;
+            $crate::log::log_object_internal(
+                level,
+                err,
+                $crate::log::Loc { file: file!(), line: line!(), func: "" },
+                ifname.map(|i| (&b"INTERFACE="[..], i)),
+                $crate::bcat!($($e),*),
+            )
+        } else {
+            -$crate::errno::errno_value(err)
+        }
+    }};
+}

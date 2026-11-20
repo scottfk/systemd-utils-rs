@@ -47,3 +47,10 @@ it's surprising and user-visible; **low** means it's cosmetic or hard to hit.
 | low | The labels and commands an event queues are kept in maps keyed by the strings' addresses, so nothing is ever a duplicate: `RUN+="x"` twice runs `x` twice, and `SECLABEL{selinux}+=` twice keeps both labels (applied in order, the last one wins). |
 | low | One invalid key in a rule line drops the whole line, the valid keys before it included. |
 | low | When `IMPORT{file}` or `IMPORT{program}` can't parse a line, the debug message shows the line as the parser left it: cut at the `=` and with the key's trailing whitespace removed (`FOO="x'` is logged as `FOO`). |
+
+## The udev helpers
+
+| Severity | Quirk |
+|---|---|
+| low | `dmi_memory_id` prints a voltage that is a multiple of 100 mV with `%.1g`, one significant digit, so 1.2 V is `MEMORY_DEVICE_0_CONFIGURED_VOLTAGE=1` and 1.5 V is `2` (other voltages use `%g`: 1.35 V is `1.35`). |
+| low | `cdrom_id` counts each failed open of a busy (`EBUSY`) drive twice, so it gives up after 11 tries (one to two seconds of waiting) rather than the 20 the loop is written for. |

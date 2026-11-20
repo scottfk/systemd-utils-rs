@@ -334,16 +334,21 @@ fn attr_subst_subdir(attr: &[u8]) -> Result<Vec<u8>, i32> {
     Err(-libc::ENOENT)
 }
 
-/// `udev_replace_ifname(event, token, buf)`: NAMING_REPLACE_STRICTLY is
-/// part of every naming scheme this build knows.
+/// `udev_replace_ifname(event, token, buf)`.
 fn udev_replace_ifname(ctx: Ctx, event: &Event, token: &Token, buf: &mut [u8]) {
-    let mut count = 0;
-    for c in buf.iter_mut() {
-        if !shared::netlink::ifname_valid_char(*c) {
-            *c = b'_';
-            count += 1;
+    let count = if shared::netif_naming_scheme::naming_scheme_has(shared::netif_naming_scheme::NAMING_REPLACE_STRICTLY)
+    {
+        let mut count = 0;
+        for c in buf.iter_mut() {
+            if !shared::netlink::ifname_valid_char(*c) {
+                *c = b'_';
+                count += 1;
+            }
         }
-    }
+        count
+    } else {
+        udev_replace_chars(buf, Some(b"/"))
+    };
     if count > 0 {
         log_trace(
             ctx,

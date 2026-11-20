@@ -516,7 +516,13 @@ fn process_inotify(m: &mut Manager, ev: &mut Ev, wd: i32, mask: u32) {
 /// `udev_watch_restore()`.
 fn udev_watch_restore(m: &mut Manager) {
     let old = b"/run/udev/watch.old/";
-    let _ = shared::rm_rf::rm_rf_child(libc::AT_FDCWD, old, shared::rm_rf::REMOVE_PHYSICAL);
+    shared::rm_rf::rm_rf_safe(old);
+    udev_watch_restore_from(m, old);
+    // _cleanup_(rm_rf_safep): on every return.
+    shared::rm_rf::rm_rf_safe(old);
+}
+
+fn udev_watch_restore_from(m: &mut Manager, old: &[u8]) {
     match sys::renameat(libc::AT_FDCWD, b"/run/udev/watch/", libc::AT_FDCWD, old) {
         Err(r) if r == -libc::ENOENT => return,
         Err(r) => {
@@ -558,7 +564,6 @@ fn udev_watch_restore(m: &mut Manager) {
             }
         }
     }
-    let _ = shared::rm_rf::rm_rf_child(libc::AT_FDCWD, old, shared::rm_rf::REMOVE_PHYSICAL);
 }
 
 /// `manager_init_inotify()`: takes `fd`.

@@ -26,7 +26,7 @@ A drop-in port/reimplementation of Gentoo's systemd-utils (udev, libudev, hwdb, 
 
 ## Status
 
-Phases 1 to 5 are done: `systemd-sysctl`, `systemd-tmpfiles`,
+Phases 1 to 6 are done: `systemd-sysctl`, `systemd-tmpfiles`,
 `systemd-hwdb` and `libudev.so.1` (both ABIs) are ported, along with the
 shared code the later phases build on (see the layout below). 330 sysctl,
 893 tmpfiles and 187 hwdb differential cases match the C build, and
@@ -44,9 +44,9 @@ Phase 5 ports `udevadm` and the rules engine: `udevadm info`, `test`,
 differential cases match C, among them all of upstream's `test-udev.py`
 rule sets that don't need builtins, `verify` and `cat` on the installed
 rules, and upstream's rule runner in the destructive mode.  The builtins
-(`IMPORT{builtin}`, phase 7) are still to come.
+(`IMPORT{builtin}`) came with phase 7.
 
-Phase 6 (in progress) ports `systemd-udevd` and `udevadm control`,
+Phase 6 ports `systemd-udevd` and `udevadm control`,
 `settle`, `monitor`, `trigger`, `wait` and `lock`, on an event loop and a
 Varlink implementation in the shared crate.  The daemon runs against C's in
 user and network namespaces, fed real kernel uevents of netkit devices: the
@@ -62,9 +62,52 @@ every difference is a builtin's (module loading, `path_id`, `blkid`,
 `wait` and `lock` behave as with C.  One race shows up without the
 builtins: `udev-trigger` writes a rule for `/dev/root` right after starting
 udevd, and C 260.1 reads it at startup only because loading the builtins
-first gives the script time; until phase 7 the Rust udevd reads its rules
-earlier and picks the rule up at the next reload, after the root partition
-was processed.
+first gives the script time; without the builtins the Rust udevd read its
+rules earlier and picked the rule up at the next reload, after the root
+partition was processed.
+
+Phase 7 (done, branch `phase7-builtins`) ports every builtin and the
+eight helper programs:
+
+- **Builtins:** `blkid` (libblkid `dlopen()`ed), `btrfs`, `dissect_image`
+  (GPT probing, image policies, verity), `factory_reset`, `hwdb`,
+  `input_id`, `keyboard`, `kmod` (libkmod `dlopen()`ed), `net_driver`,
+  `net_id` (with every naming scheme), `net_setup_link` (`.link` files with
+  their `[Match]` conditions, ethtool settings, rtnetlink link properties,
+  SR-IOV, IRQ affinity), `path_id`, `uaccess` (ACLs on the seat's devices)
+  and `usb_id`; `udevadm test-builtin` runs them.
+- **Helpers** (crate `udev-helpers`): `ata_id`, `cdrom_id`, `scsi_id`
+  (SG_IO v4 and v3), `dmi_memory_id`, `fido_id`, `iocost`, `mtd_probe`
+  and `v4l_id`.
+- **udevd** rereads GPT partition tables through libblkid (adding,
+  resizing and removing kernel partitions one by one), as C does.
+
+On the host, `usb_id` and `path_id` match C on every device (128 and 1266
+of them), every builtin matches C on upstream's fake sysfs through
+`udevadm test-builtin`, a udevd scenario renames interfaces through `.link`
+files, `dmi_memory_id` matches C and upstream's expected output on
+upstream's DMI dumps, and the helpers' command lines, failures and
+`scsi_id`'s config file match.
+
+In the VM, as root on its SATA disk and CD drive and their SCSI generic
+nodes, all 98 probes match C v262: `ata_id`, `cdrom_id`, `scsi_id` (every
+page and SG version), `dmi_memory_id`, `iocost query`, and `udevadm
+test-builtin` and `udevadm test` on every block and SCSI generic device
+(devlinks compared as sets, since C's order is a hash order that changes
+from run to run).  A partition-table test rewrites a loop device's table
+behind the kernel's back ten times (GPT adds, resizes and deletes, with
+partitions busy or open, a DOS table, a wipe); the udevd inotify watch's
+reread gives the same uevents, kernel partitions and log lines as C.  For
+the boot comparison only udevadm and the helpers are swapped (the rules
+and hwdb stay the guest's): two C v262 boots and the Rust boot give the same
+`/dev`, symlinks, `/run/udev`, loaded modules, links and services, and the
+same database apart from hash order.  The VM pass found three bugs, each
+now covered by a host test: the `kmod` builtin ignored modprobe.d
+deny-lists (a wrong flag value; the guest loaded `snd_pcsp` and the sound
+stack, which C refuses), udevd left `/run/udev/watch.old` behind after
+restoring the initramfs udevd's watches, and hwdb.bin (14 MB) was read
+into memory instead of mapped, which also delayed udevd's rules load
+enough to flip the `/dev/root` race described above.
 
 The reference is upstream's tag `v262` (its sources are the same as the release
 tarball's), built as Gentoo builds it ([tools/build-reference.sh](tools/build-reference.sh)):
@@ -86,8 +129,9 @@ same 12 programs, the same exported libudev symbols on both ABIs (92 functions i
 | `crates/sysctl` | `systemd-sysctl` (`src/sysctl/sysctl.c`) |
 | `crates/tmpfiles` | `systemd-tmpfiles` (`src/tmpfiles/tmpfiles.c`, `offline-passwd.c`) |
 | `crates/hwdb` | `systemd-hwdb` (`src/hwdb/hwdb.c`); the compiler and sd-hwdb are `shared::hwdb` (`hwdb-util.c`, `sd-hwdb.c`, `strbuf.c`), for udevadm and libudev later |
-| `crates/udevadm` | `udevadm` (`src/udev/udevadm*.c`): `info`, `test`, `verify`, `cat` and the deprecated `hwdb`; `control`, `settle`, `monitor`, `trigger`, `wait` and `lock`; `test-builtin` (phase 7) has its option table (for `--help` and `--introspect-cli`) but fails "not ported yet".  Invoked as `systemd-udevd`, it is the daemon (`src/udevd/`).  The engine (`src/udev/udev-*.c`) is the library: the rules parser and the matching and assignment of every key, the `%`/`$` substitutions, `PROGRAM`/`IMPORT{program}`/`RUN` execution, the event (with the destructive steps udevd takes: the database and tag index, attribute and sysctl writes, device node permissions and the `/dev` symlink stacks), `OPTIONS="dump"`.  The builtins are a table only (phase 7).  `src/bin/test-udev-rule-runner.rs` is upstream's rule runner, for the tests. |
+| `crates/udevadm` | `udevadm` (`src/udev/udevadm*.c`): `info`, `test`, `verify`, `cat` and the deprecated `hwdb`; `control`, `settle`, `monitor`, `trigger`, `wait` and `lock`; `test-builtin`.  Invoked as `systemd-udevd`, it is the daemon (`src/udevd/`).  The engine (`src/udev/udev-*.c`) is the library: the rules parser and the matching and assignment of every key, the `%`/`$` substitutions, `PROGRAM`/`IMPORT{program}`/`RUN` execution, the event (with the destructive steps udevd takes: the database and tag index, attribute and sysctl writes, device node permissions and the `/dev` symlink stacks), `OPTIONS="dump"`, and the builtins (`src/udev/udev-builtin*.c`, with `.link` files in `udev/net`).  `src/bin/test-udev-rule-runner.rs` is upstream's rule runner, for the tests. |
 | `crates/libudev` | `libudev.so.1` (`src/libudev`): the C ABI over `shared::sd_device` (`sd-device.c`, `device-private.c`, `device-util.c`), `shared::device_enumerator`, `shared::device_monitor` (with its BPF filter) and `shared::device_filter`; the netlink calls are in `shared::sys_net`, the RTM_GETLINK lookup in `shared::netlink`.  Built as a static library and linked by `tools/link-libudev.sh` with upstream's version script. |
+| `crates/udev-helpers` | the helper programs in `/usr/lib/udev`: `ata_id`, `cdrom_id`, `scsi_id`, `dmi_memory_id`, `fido_id`, `iocost`, `mtd_probe` and `v4l_id` (`src/udev/*/`) |
 | `tests/common` | the differential harness, shared by every crate's tests |
 | `tests/shim` | the LD_PRELOAD clock |
 | `tools` | the reference build, and the libudev link step |
@@ -143,9 +187,6 @@ isn't possible or isn't worth it:
   `$ATA_ID_PATH` and friends are honored.
 - udevadm: `SECLABEL{selinux}` and `SECLABEL{smack}` are accepted and
   logged as set, as in C built without SELinux and SMACK.
-- udevadm: interface names are always sanitized as the naming schemes with
-  `NAMING_REPLACE_STRICTLY` (all of them since v247) do; `net.naming_scheme=`
-  is ignored until `net_id` is ported (phase 7).
 - udevd: there is no service manager file descriptor store, so the inotify
   fd, the `udevadm control` settings and queued events are not pushed to
   one on exit (C only does with `$NOTIFY_SOCKET`); fds passed in
@@ -154,10 +195,6 @@ isn't possible or isn't worth it:
   (C keeps them while later events reference them as blockers; the
   blocker search starts at the same place), and workers are picked for
   events in the order they were spawned (C iterates a hash map).
-- udevd: without libblkid, the partition table of a whole disk whose node
-  was closed after writing is reread with `BLKRRPART` (C's path without
-  libblkid); C with libblkid adds, resizes and removes GPT partitions one
-  by one.  This comes with the `blkid` builtin (phase 7).
 - The event loop fires timers at their time (sd-event coalesces them within
   their accuracy), and the Varlink server answers each method before the
   handler returns (no deferred replies, "more" or "upgrade" calls, and
@@ -235,7 +272,11 @@ then runs the test suites (so far, the differential cases of phases 1 to 6):
      `RUN` programs did.  Output that varies even between two C runs is
      normalized: hash-ordered sets (devlinks, tags, written attributes),
      `USEC_INITIALIZED` of devices without a database entry, the CPU's APIC
-     id; and until phase 7, the builtins' init and exit logging.
+     id.  Every builtin runs through `udevadm test-builtin` on the fake
+     sysfs too.
+   - The helpers run on their command lines, on device nodes the sandbox
+     can reach, on `scsi_id` config files and on upstream's DMI dumps
+     (`crates/udev-helpers/tests/diff_helpers.rs`).
    - udevd runs in a user and network namespace of its own, with sysfs
      remounted for it and an empty `/run`; netkit devices created there (and
      writes to their `uevent` files) give real kernel uevents
@@ -265,13 +306,14 @@ then runs the test suites (so far, the differential cases of phases 1 to 6):
 5. **The rules engine (done, branch `phase5-rules`):** `udev-rules.c`, formatting and substitutions, `udevadm test`,
    `info`, `verify` and `cat`, node and link handling, the database writer.
    Node and link handling still has to be tested in the VM (phase 6).
-6. **udevd (in progress, branch `phase6-udevd`):** the manager and workers, the netlink monitor, inotify watches,
+6. **udevd (done, branch `phase6-udevd`):** the manager and workers, the netlink monitor, inotify watches,
    varlink, interface renaming, and `udevadm trigger`, `settle`, `control`, `monitor`,
    `wait`, `lock`; boot-tested in the VM (snapshot `systemd-utils-base`).  The full
    `/dev` and `/run/udev` comparison of whole boots comes with the builtins.
-7. **Builtins and helpers:** `blkid`, `btrfs`, `hwdb`, `input_id`, `keyboard`, `kmod`,
+7. **Builtins and helpers (done, branch `phase7-builtins`):** `blkid`, `btrfs`, `hwdb`, `input_id`, `keyboard`, `kmod`,
    `net_id`, `net_setup_link` (`.link` files), `path_id`, `uaccess`, `usb_id` and the
-   rest, plus the eight helper programs in `/usr/lib/udev`.
+   rest, plus the eight helper programs in `/usr/lib/udev`; probed as root on the VM's
+   drives, and whole boots compared with C v262's.
 8. **Packaging:** a Gentoo ebuild (a `sys-apps/systemd-utils` drop-in), with a VM
    rehearsal and a rollback through a binary package of the C build.
 

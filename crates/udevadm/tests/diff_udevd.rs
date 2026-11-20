@@ -68,6 +68,7 @@ stop() {
 settle() { "$U" settle -t 20; echo "settle=$?"; }
 info() { "$U" info "$@" | grep -v '^E: USEC_INITIALIZED='; }
 link() { ip link add "$1" type netkit peer name "$2"; }
+link2() { ip link add "$1" type netkit mode l2 peer name "$2"; }
 quiet() { sleep 0.4; }
 "#;
 
@@ -114,28 +115,12 @@ fn run(daemon: &PathBuf, label: &str, name: &str, script: &str, env: &[(&str, &s
     s
 }
 
-/// The lines of builtins and helpers not ported before phase 7.
+/// Lines that depend on the sandbox rather than the program: the process
+/// title (which depends on the environment's size) and the container
+/// detection.
 fn is_masked(line: &str) -> bool {
-    const PREFIXES: &[&str] = &[
-        "Trying to open \"",
-        "=== trie on-disk ===",
-        "tool version:",
-        "file size:",
-        "header size",
-        "strings ",
-        "nodes ",
-        "Loaded hardware database.",
-        "Loaded kernel module index.",
-        "Using default interface naming scheme",
-        "Parsed configuration file \"",
-        "Loaded link configuration context.",
-        "Unloaded hardware database.",
-        "Unloaded kernel module index.",
-        "Unloaded link configuration context.",
-        "PR_SET_MM_ARG_START failed",
-        "Failed to read $container of PID 1",
-        "Found container virtualization",
-    ];
+    const PREFIXES: &[&str] =
+        &["PR_SET_MM_ARG_START failed", "Failed to read $container of PID 1", "Found container virtualization"];
     PREFIXES.iter().any(|p| line.starts_with(p))
 }
 
@@ -614,6 +599,156 @@ stop
 }
 
 #[test]
+fn link_files() {
+    // .link files on L2 netkit devices: matching, names and alternative
+    // names, MAC address policies, rtnetlink settings, udev properties,
+    // drop-ins, conditions, and the parser's warnings.
+    check(
+        "link_files",
+        r#"
+mount -t tmpfs tmpfs /usr/lib/systemd/network
+mkdir -p /run/systemd/network/10-name.link.d
+cat > /run/udev/rules.d/80-net.rules <<'EOF'
+SUBSYSTEM!="net", GOTO="end"
+ACTION=="remove", GOTO="end"
+IMPORT{builtin}="net_driver"
+IMPORT{builtin}="net_id"
+IMPORT{builtin}="net_setup_link"
+NAME=="", ENV{ID_NET_NAME}!="", NAME="$env{ID_NET_NAME}"
+LABEL="end"
+EOF
+cat > /run/systemd/network/10-name.link <<'EOF'
+[Match]
+OriginalName=n0
+[Link]
+Description=renamed by Name=
+Name=named0
+AlternativeName=alt-n0 alt-n0 bad/name
+MACAddressPolicy=none
+MACAddress=02:11:22:33:44:55
+MTUBytes=1400
+TransmitQueueLength=500
+Alias=hello alias
+Property=FOO=bar "BAZ=a b" FOO=again DEVPATH=x
+ImportProperty=ID_NET_DRIVER
+UnsetProperty=ID_NET_NAMING_SCHEME
+EOF
+cat > /run/systemd/network/10-name.link.d/50-more.conf <<'EOF'
+[Link]
+TransmitQueueLength=600
+EOF
+cat > /run/systemd/network/20-persistent.link <<'EOF'
+[Match]
+OriginalName=p*
+Driver=netkit
+Property=ID_NET_DRIVER=netkit
+[Link]
+NamePolicy=keep kernel mac path
+AlternativeNamesPolicy=mac path
+MACAddressPolicy=persistent
+EOF
+cat > /run/systemd/network/30-random.link <<'EOF'
+[Match]
+OriginalName=r0
+Type=ether
+[Link]
+MACAddressPolicy=random
+Name=rnd0
+EOF
+cat > /run/systemd/network/40-nomatch.link <<'EOF'
+[Match]
+Host=no-such-host
+Virtualization=!container
+Architecture=no-such-arch
+[Link]
+Name=never
+EOF
+cat > /run/systemd/network/50-warnings.link <<'EOF'
+Outside=1
+[Match]
+OriginalName=!x0 bad/name
+MACAddress=00:11:22:33:44:55 nonsense 0011.2233.4455
+PermanentMACAddress=
+Property=NOEQUALS
+KernelCommandLine=
+[Nosuch]
+Key=1
+[Link]
+NoSuchKey=1
+X-Extension=1
+Name=way-too-long-interface-name
+MTUBytes=1x
+BitsPerSecond=10G
+Duplex=sideways
+AutoNegotiation=maybe
+Advertise=10baset-full nosuchmode
+Port=tp
+MDI=crossover
+WakeOnLan=magic nosuch phy
+WakeOnLanPassword=00:11:22:33:44
+RxChannels=max
+TxChannels=0
+OtherChannels=x
+RxBufferSize=1024
+RxCoalesceSec=1s
+StatisticsBlockCoalesceSec=0
+TxMaxCoalescedFrames=abc
+NamePolicy=mac mac kernel nosuch
+AlternativeNamesPolicy=kernel path
+TransmitQueues=0
+ReceiveQueues=16385
+GenericSegmentOffloadMaxBytes=64K
+GenericSegmentOffloadMaxSegments=lots
+UDPSegmentationOffload=yes
+ReceiveChecksumOffload=yes
+IRQAffinityPolicy=nosuch
+IRQAffinity=0-1 3-2 x
+IRQAffinityNUMA=local
+ReceivePacketSteeringCPUMask=all
+SR-IOVVirtualFunctions=2
+Alias=caf\xc3\xa9
+[SR-IOV]
+VirtualFunction=0
+VLANId=5000
+[SR-IOV]
+VirtualFunction=1
+Trust=sure
+[SR-IOV]
+VLANId=3
+[SR-IOV]
+VirtualFunction=7
+[SR-IOV]
+VirtualFunction=1
+MACSpoofCheck=yes
+LinkState=auto
+[EnergyEfficientEthernet]
+Enable=yes
+TxLowPowerIdleSec=1d
+LinkMode=nosuch
+EOF
+: > /run/systemd/network/60-empty.link
+cat > /run/systemd/network/70-nomatch-section.link <<'EOF'
+[Link]
+Name=nope
+EOF
+start -c 1
+"$U" control -s
+link2 n0 n1
+link2 p0 p1
+link2 r0 r1
+quiet
+"$U" control -S
+settle
+ip -br link | awk '{print $1}' | sort
+ip -d link show named0 | grep -o 'mtu [0-9]*\|qlen [0-9]*\|link/ether [0-9a-f:]*\|altname [a-z0-9-]*\|alias .*' | sort
+info /sys/class/net/named0
+info /sys/class/net/p0
+stop
+"#,
+    );
+}
+
+#[test]
 fn empty_rules_reload() {
     check(
         "empty_rules",
@@ -628,5 +763,86 @@ echo change > /sys/class/net/e0/uevent
 settle
 stop
 "#,
+    );
+}
+
+/// Watches left by an earlier udevd (the initramfs one at boot): moved to
+/// watch.old, restored, and watch.old removed.  The VM found it left
+/// behind; a second start finds a stale watch.old too.
+#[test]
+fn watch_restore() {
+    check(
+        "watch_restore",
+        r#"
+mkdir -p /run/udev/watch /run/udev/watch.old/sub
+ln -s b999:0 /run/udev/watch/1
+ln -s 1 /run/udev/watch/b999:0
+ln -s 2 /run/udev/watch/n99999
+ln -s x /run/udev/watch.old/sub/stale
+start -c 1
+settle
+stop
+ls -A /run/udev
+mkdir -p /run/udev/watch
+ln -s 3 /run/udev/watch/c999:1
+start -c 1
+settle
+stop
+"#,
+    );
+}
+
+/// A module modules.dep lists that isn't loaded, spelled with dashes as a
+/// config would, or None.
+fn unloaded_module() -> Option<String> {
+    let rel = std::fs::read_to_string("/proc/sys/kernel/osrelease").ok()?;
+    let dep = std::fs::read_to_string(format!("/lib/modules/{}/modules.dep", rel.trim())).ok()?;
+    let loaded = std::fs::read_to_string("/proc/modules").ok()?;
+    let loaded: Vec<&str> = loaded.lines().filter_map(|l| l.split(' ').next()).collect();
+    let mut names: Vec<String> = dep
+        .lines()
+        .filter_map(|l| l.split(':').next())
+        .filter_map(|p| p.rsplit('/').next())
+        .filter_map(|f| f.split(".ko").next())
+        .map(|n| n.replace('-', "_"))
+        .filter(|n| n.contains('_') && !loaded.contains(&n.as_str()))
+        .collect();
+    names.sort();
+    names.into_iter().next().map(|n| n.replace('_', "-"))
+}
+
+/// The kmod builtin in a worker (test mode skips it): modules deny-listed
+/// in modprobe.d by name and through an alias, a plain insert (EPERM in
+/// the user namespace) and an unknown module.  The VM found the port
+/// ignoring the deny-list.
+#[test]
+fn kmod_denylist() {
+    let Some(m) = unloaded_module() else {
+        eprintln!("kmod_denylist: no unloaded module, skipping");
+        return;
+    };
+    check_env(
+        "kmod_denylist",
+        r#"
+mkdir -p /run/mpd
+for d in /etc/modprobe.d /usr/lib/modprobe.d /lib/modprobe.d /run/modprobe.d; do
+    [ -d "$d" ] && [ ! -L "$d" ] && mount --bind /run/mpd "$d"
+done
+echo "SUBSYSTEM==\"net\", ACTION==\"add\", RUN{builtin}+=\"kmod load $M nosuch-module\"" > /run/udev/rules.d/50-t.rules
+echo 'SUBSYSTEM=="net", ACTION=="change", RUN{builtin}+="kmod load sdu-test-alias"' >> /run/udev/rules.d/50-t.rules
+start -c 1
+link k0 k1
+settle
+echo "blacklist $M" > /run/mpd/deny.conf
+echo "alias sdu-test-alias $M" >> /run/mpd/deny.conf
+"$U" control -R
+quiet
+echo change > /sys/class/net/k0/uevent
+settle
+link k2 k3
+settle
+stop
+"#,
+        &[("M", &m)],
     );
 }
